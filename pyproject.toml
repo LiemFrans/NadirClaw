@@ -26,4 +26,4 @@ nadirclaw = "nadirclaw.cli:main"
 include = ["nadirclaw*"]
 
 [tool.setuptools.package-data]
-nadirclaw = ["models.json"]
+nadirclaw = ["*.npy"]

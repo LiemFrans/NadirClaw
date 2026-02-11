@@ -124,6 +124,43 @@ def status():
         click.echo("\nServer:        NOT RUNNING")
 
 
+@main.command(name="build-centroids")
+def build_centroids():
+    """Regenerate centroid .npy files from prototype prompts."""
+    import logging
+
+    import numpy as np
+
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+
+    from nadirclaw.encoder import get_shared_encoder_sync
+    from nadirclaw.prototypes import COMPLEX_PROTOTYPES, SIMPLE_PROTOTYPES
+
+    click.echo("Loading encoder...")
+    encoder = get_shared_encoder_sync()
+
+    click.echo(f"Encoding {len(SIMPLE_PROTOTYPES)} simple prototypes...")
+    simple_embs = encoder.encode(SIMPLE_PROTOTYPES, show_progress_bar=False)
+    simple_centroid = simple_embs.mean(axis=0)
+    simple_centroid = simple_centroid / np.linalg.norm(simple_centroid)
+
+    click.echo(f"Encoding {len(COMPLEX_PROTOTYPES)} complex prototypes...")
+    complex_embs = encoder.encode(COMPLEX_PROTOTYPES, show_progress_bar=False)
+    complex_centroid = complex_embs.mean(axis=0)
+    complex_centroid = complex_centroid / np.linalg.norm(complex_centroid)
+
+    pkg_dir = os.path.dirname(os.path.abspath(__file__))
+    simple_path = os.path.join(pkg_dir, "simple_centroid.npy")
+    complex_path = os.path.join(pkg_dir, "complex_centroid.npy")
+
+    np.save(simple_path, simple_centroid.astype(np.float32))
+    np.save(complex_path, complex_centroid.astype(np.float32))
+
+    click.echo(f"\nSaved: {simple_path}")
+    click.echo(f"Saved: {complex_path}")
+    click.echo(f"Centroid dimension: {simple_centroid.shape[0]}")
+
+
 @main.group()
 def openclaw():
     """OpenClaw integration commands."""

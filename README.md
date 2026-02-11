@@ -241,11 +241,12 @@ print(response.choices[0].message.content)
 ## CLI Reference
 
 ```bash
-nadirclaw serve      # Start the router server
-nadirclaw classify   # Classify a prompt (no server needed)
-nadirclaw status     # Show config and check if server is running
+nadirclaw serve            # Start the router server
+nadirclaw classify         # Classify a prompt (no server needed)
+nadirclaw status           # Show config and check if server is running
 nadirclaw codex onboard    # Configure Codex integration
 nadirclaw openclaw onboard # Configure OpenClaw integration
+nadirclaw build-centroids  # Regenerate centroid vectors from prototypes
 ```
 
 ### `nadirclaw serve`
@@ -301,9 +302,9 @@ Server:        RUNNING (ok)
 
 NadirClaw uses a binary complexity classifier based on sentence embeddings:
 
-1. **Startup**: Embeds ~170 seed prompts (simple + complex examples) using [all-MiniLM-L6-v2](https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2) (~80 MB model, downloaded once) and computes a centroid vector for each class.
+1. **Pre-computed centroids**: Ships two tiny centroid vectors (~1.5 KB each) derived from ~170 seed prompts. These are pre-computed and included in the package — no training step required.
 
-2. **Classification**: For each incoming prompt, computes its embedding and measures cosine similarity to both centroids. If the prompt is closer to the complex centroid, it routes to your complex model; otherwise to your simple model.
+2. **Classification**: For each incoming prompt, computes its embedding using [all-MiniLM-L6-v2](https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2) (~80 MB, downloaded once on first use) and measures cosine similarity to both centroids. If the prompt is closer to the complex centroid, it routes to your complex model; otherwise to your simple model.
 
 3. **Borderline handling**: When confidence is below the threshold (default 0.06), the classifier defaults to complex -- it's cheaper to over-serve a simple prompt than to under-serve a complex one.
 
@@ -350,7 +351,9 @@ nadirclaw/
   encoder.py         # Shared SentenceTransformer singleton
   auth.py            # Bearer token / API key authentication
   settings.py        # Environment-based configuration
-  models.json        # Model performance data for ranking
+  prototypes.py      # Seed prompts for centroid generation
+  simple_centroid.npy   # Pre-computed simple centroid vector
+  complex_centroid.npy  # Pre-computed complex centroid vector
 ```
 
 ## License
