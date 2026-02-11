@@ -62,17 +62,37 @@ sudo rm -f /usr/local/bin/nadirclaw
 
 ## Configure
 
+### Authentication
+
+NadirClaw supports multiple ways to provide LLM credentials, checked in this order:
+
+1. **OpenClaw stored token** (`~/.openclaw/openclaw.json`)
+2. **NadirClaw stored credential** (`~/.nadirclaw/credentials.json`)
+3. **Environment variable** (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, etc.)
+
+#### Using `nadirclaw auth` (recommended)
+
+```bash
+# Store a Claude subscription token (from 'claude setup-token')
+nadirclaw auth setup-token
+
+# Or add any provider API key
+nadirclaw auth add --provider anthropic --key sk-ant-...
+nadirclaw auth add --provider openai --key sk-...
+
+# Check what's configured
+nadirclaw auth status
+
+# Remove a credential
+nadirclaw auth remove anthropic
+```
+
+#### Using environment variables
+
 Copy the example env file and add your API keys:
 
 ```bash
 cp .env.example .env
-```
-
-The two key settings are which model handles each tier:
-
-```bash
-NADIRCLAW_SIMPLE_MODEL=ollama/llama3.1:8b          # cheap/local model
-NADIRCLAW_COMPLEX_MODEL=claude-sonnet-4-20250514   # premium model
 ```
 
 Set the API key(s) for whichever providers you use:
@@ -80,6 +100,15 @@ Set the API key(s) for whichever providers you use:
 ```bash
 ANTHROPIC_API_KEY=sk-ant-...
 OPENAI_API_KEY=sk-...
+```
+
+### Model Configuration
+
+The two key settings are which model handles each tier:
+
+```bash
+NADIRCLAW_SIMPLE_MODEL=ollama/llama3.1:8b          # cheap/local model
+NADIRCLAW_COMPLEX_MODEL=claude-sonnet-4-20250514   # premium model
 ```
 
 ### Example Setups
@@ -157,7 +186,7 @@ nadirclaw serve
     "providers": {
       "nadirclaw": {
         "baseUrl": "http://localhost:8000/v1",
-        "apiKey": "${NADIRCLAW_AUTH_TOKEN}",
+        "apiKey": "local",
         "api": "openai-completions",
         "models": [{ "id": "auto" }]
       }
@@ -190,7 +219,7 @@ model_provider = "nadirclaw"
 
 [model_providers.nadirclaw]
 base_url = "http://localhost:8000/v1"
-env_key = "NADIRCLAW_AUTH_TOKEN"
+api_key = "local"
 ```
 
 ## Usage with Any OpenAI-Compatible Tool
@@ -201,11 +230,6 @@ NadirClaw exposes a standard OpenAI-compatible API. Point any tool at it:
 # Base URL
 http://localhost:8000/v1
 
-# Auth
-Authorization: Bearer nadir-local    # default token
-# or
-X-API-Key: nadir-local
-
 # Model
 model: "auto"    # or omit -- NadirClaw picks the best model
 ```
@@ -214,7 +238,6 @@ model: "auto"    # or omit -- NadirClaw picks the best model
 
 ```bash
 curl http://localhost:8000/v1/chat/completions \
-  -H "Authorization: Bearer nadir-local" \
   -H "Content-Type: application/json" \
   -d '{
     "messages": [{"role": "user", "content": "What is 2+2?"}]
@@ -228,7 +251,7 @@ from openai import OpenAI
 
 client = OpenAI(
     base_url="http://localhost:8000/v1",
-    api_key="nadir-local",
+    api_key="local",  # NadirClaw doesn't require auth by default
 )
 
 response = client.chat.completions.create(
@@ -241,12 +264,16 @@ print(response.choices[0].message.content)
 ## CLI Reference
 
 ```bash
-nadirclaw serve            # Start the router server
-nadirclaw classify         # Classify a prompt (no server needed)
-nadirclaw status           # Show config and check if server is running
-nadirclaw codex onboard    # Configure Codex integration
-nadirclaw openclaw onboard # Configure OpenClaw integration
-nadirclaw build-centroids  # Regenerate centroid vectors from prototypes
+nadirclaw serve              # Start the router server
+nadirclaw classify           # Classify a prompt (no server needed)
+nadirclaw status             # Show config, credentials, and server status
+nadirclaw auth setup-token   # Store a Claude subscription token
+nadirclaw auth add           # Add an API key for any provider
+nadirclaw auth status        # Show configured credentials (masked)
+nadirclaw auth remove        # Remove a stored credential
+nadirclaw codex onboard      # Configure Codex integration
+nadirclaw openclaw onboard   # Configure OpenClaw integration
+nadirclaw build-centroids    # Regenerate centroid vectors from prototypes
 ```
 
 ### `nadirclaw serve`
@@ -314,7 +341,7 @@ Classification takes ~10ms on a warm encoder. The first request takes ~2-3 secon
 
 ## API Endpoints
 
-All endpoints require auth (`Authorization: Bearer <token>` or `X-API-Key: <token>`).
+Auth is disabled by default (local-only). Set `NADIRCLAW_AUTH_TOKEN` to require a bearer token.
 
 | Endpoint | Method | Description |
 |---|---|---|
@@ -331,7 +358,7 @@ All endpoints require auth (`Authorization: Bearer <token>` or `X-API-Key: <toke
 |---|---|---|
 | `NADIRCLAW_SIMPLE_MODEL` | `ollama/llama3.1:8b` | Model for simple prompts |
 | `NADIRCLAW_COMPLEX_MODEL` | `claude-sonnet-4-20250514` | Model for complex prompts |
-| `NADIRCLAW_AUTH_TOKEN` | `nadir-local` | Bearer token for API auth |
+| `NADIRCLAW_AUTH_TOKEN` | *(empty — auth disabled)* | Set to require a bearer token |
 | `ANTHROPIC_API_KEY` | -- | Anthropic API key |
 | `OPENAI_API_KEY` | -- | OpenAI API key |
 | `OLLAMA_API_BASE` | `http://localhost:11434` | Ollama base URL |
@@ -345,9 +372,10 @@ All endpoints require auth (`Authorization: Bearer <token>` or `X-API-Key: <toke
 ```
 nadirclaw/
   __init__.py        # Package version
-  cli.py             # CLI commands (serve, classify, status, codex, openclaw)
+  cli.py             # CLI commands (serve, classify, status, auth, codex, openclaw)
   server.py          # FastAPI server with OpenAI-compatible API
   classifier.py      # Binary complexity classifier (sentence embeddings)
+  credentials.py     # Credential storage and resolution chain
   encoder.py         # Shared SentenceTransformer singleton
   auth.py            # Bearer token / API key authentication
   settings.py        # Environment-based configuration

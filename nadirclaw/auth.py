@@ -82,6 +82,11 @@ async def validate_local_auth(
     elif x_api_key:
         token = x_api_key.strip()
 
+    # If no auth token is configured, allow all requests (local-only mode)
+    configured_token = settings.AUTH_TOKEN
+    if not configured_token:
+        return UserSession(_LOCAL_USERS.get("", _default_user()))
+
     if not token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -96,3 +101,12 @@ async def validate_local_auth(
         )
 
     return UserSession(user_data)
+
+
+def _default_user() -> Dict[str, Any]:
+    """Default user when auth is disabled."""
+    return {
+        "id": "local-user",
+        "name": "Local User",
+        "allowed_models": settings.tier_models,
+    }

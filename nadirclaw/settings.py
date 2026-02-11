@@ -13,7 +13,7 @@ class Settings:
 
     @property
     def AUTH_TOKEN(self) -> str:
-        return os.getenv("NADIRCLAW_AUTH_TOKEN", "nadir-local")
+        return os.getenv("NADIRCLAW_AUTH_TOKEN", "")
 
     @property
     def SIMPLE_MODEL(self) -> str:
@@ -64,6 +64,10 @@ class Settings:
     @property
     def LOG_DIR(self) -> Path:
         return Path(os.getenv("NADIRCLAW_LOG_DIR", "~/.nadirclaw/logs")).expanduser()
+
+    @property
+    def CREDENTIALS_FILE(self) -> Path:
+        return Path.home() / ".nadirclaw" / "credentials.json"
 
     @property
     def has_explicit_tiers(self) -> bool:

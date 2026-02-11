@@ -97,6 +97,7 @@ def status():
     """Check if NadirClaw server is running and show config."""
     import urllib.request
 
+    from nadirclaw.credentials import list_credentials
     from nadirclaw.settings import settings
 
     click.echo("NadirClaw Status")
@@ -111,7 +112,20 @@ def status():
     click.echo(f"Threshold:     {settings.CONFIDENCE_THRESHOLD}")
     click.echo(f"Log dir:       {settings.LOG_DIR}")
     token = settings.AUTH_TOKEN
-    click.echo(f"Token:         {token[:6]}***" if len(token) >= 6 else f"Token:         {token}")
+    if token:
+        click.echo(f"Auth:          {token[:6]}***" if len(token) >= 6 else f"Auth:          {token}")
+    else:
+        click.echo("Auth:          disabled (local-only)")
+
+    # Show credential status
+    creds = list_credentials()
+    if creds:
+        click.echo(f"\nCredentials:   {len(creds)} provider(s)")
+        for c in creds:
+            click.echo(f"  {c['provider']:12s}  {c['masked_token']}  ({c['source']})")
+    else:
+        click.echo("\nCredentials:   none configured")
+        click.echo("  Run 'nadirclaw auth add' or set env vars (ANTHROPIC_API_KEY, etc.)")
 
     # Check if server is running
     try:
@@ -162,6 +176,94 @@ def build_centroids():
 
 
 @main.group()
+def auth():
+    """Manage provider credentials (API keys and tokens)."""
+    pass
+
+
+@auth.command(name="setup-token")
+def setup_token():
+    """Store a Claude subscription token from 'claude setup-token'."""
+    from nadirclaw.credentials import get_credential_source, save_credential
+
+    click.echo("Paste your Claude setup token (from 'claude setup-token'):")
+    token = click.prompt("Token", hide_input=True)
+
+    if not token or not token.strip():
+        click.echo("Error: empty token provided.")
+        raise SystemExit(1)
+
+    token = token.strip()
+    save_credential("anthropic", token, source="setup-token")
+
+    click.echo("\nAnthropic credential saved (source: setup-token)")
+    click.echo(f"  Token: {token[:8]}...{token[-4:]}" if len(token) > 12 else f"  Token: {token[:4]}***")
+    click.echo("\nNadirClaw will use this token for Claude models.")
+    click.echo("Verify with: nadirclaw auth status")
+
+
+@auth.command(name="add")
+@click.option("--provider", "-p", default=None, help="Provider name (e.g. anthropic, openai)")
+@click.option("--key", "-k", default=None, help="API key or token")
+def auth_add(provider, key):
+    """Add an API key for a provider."""
+    from nadirclaw.credentials import save_credential
+
+    if not provider:
+        provider = click.prompt(
+            "Provider",
+            type=click.Choice(["anthropic", "openai", "google", "cohere", "mistral"], case_sensitive=False),
+        )
+
+    if not key:
+        key = click.prompt(f"API key for {provider}", hide_input=True)
+
+    if not key or not key.strip():
+        click.echo("Error: empty key provided.")
+        raise SystemExit(1)
+
+    key = key.strip()
+    save_credential(provider, key, source="manual")
+    click.echo(f"\n{provider} credential saved.")
+    click.echo("Verify with: nadirclaw auth status")
+
+
+@auth.command(name="status")
+def auth_status():
+    """Show configured credentials (tokens are masked)."""
+    from nadirclaw.credentials import list_credentials
+
+    creds = list_credentials()
+    if not creds:
+        click.echo("No credentials configured.")
+        click.echo("\nAdd credentials with:")
+        click.echo("  nadirclaw auth setup-token   # Claude subscription token")
+        click.echo("  nadirclaw auth add           # Any provider API key")
+        click.echo("  Or set env vars: ANTHROPIC_API_KEY, OPENAI_API_KEY, etc.")
+        return
+
+    click.echo("Configured Credentials")
+    click.echo("-" * 50)
+    for c in creds:
+        click.echo(f"  {c['provider']:12s}  {c['masked_token']}  ({c['source']})")
+    click.echo(f"\n{len(creds)} provider(s) configured.")
+
+
+@auth.command(name="remove")
+@click.argument("provider")
+def auth_remove(provider):
+    """Remove a stored credential for PROVIDER."""
+    from nadirclaw.credentials import remove_credential
+
+    if remove_credential(provider):
+        click.echo(f"Removed stored credential for {provider}.")
+    else:
+        click.echo(f"No stored credential found for {provider}.")
+        click.echo("Note: this only removes credentials stored via 'nadirclaw auth'. "
+                    "Env vars are not affected.")
+
+
+@main.group()
 def openclaw():
     """OpenClaw integration commands."""
     pass
@@ -193,7 +295,7 @@ def onboard():
     # Build the NadirClaw provider config
     nadirclaw_provider = {
         "baseUrl": f"http://localhost:{settings.PORT}/v1",
-        "apiKey": "${NADIRCLAW_AUTH_TOKEN}",
+        "apiKey": "local",
         "api": "openai-completions",
         "models": [
             {
@@ -266,7 +368,7 @@ model_provider = "nadirclaw"
 
 [model_providers.nadirclaw]
 base_url = "http://localhost:{settings.PORT}/v1"
-env_key = "NADIRCLAW_AUTH_TOKEN"
+api_key = "local"
 """
 
     codex_dir.mkdir(parents=True, exist_ok=True)
@@ -276,7 +378,6 @@ env_key = "NADIRCLAW_AUTH_TOKEN"
     click.echo(f"\nWrote Codex config to {config_path}")
     click.echo("\nNadirClaw configured as Codex model provider.")
     click.echo(f"  Base URL: http://localhost:{settings.PORT}/v1")
-    click.echo("  Auth:     $NADIRCLAW_AUTH_TOKEN")
     click.echo("\nNext steps:")
     click.echo("  1. Start NadirClaw:  nadirclaw serve")
     click.echo("  2. Run Codex:        codex")

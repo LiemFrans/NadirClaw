@@ -131,7 +131,22 @@ async def startup():
             logger.info("Tier config:   derived from NADIRCLAW_MODELS")
         logger.info("Ollama base:   %s", settings.OLLAMA_API_BASE)
         token = settings.AUTH_TOKEN
-        logger.info("Auth token:    %s***", token[:6] if len(token) >= 6 else token)
+        if token:
+            logger.info("Auth:          %s***", token[:6] if len(token) >= 6 else token)
+        else:
+            logger.info("Auth:          disabled (local-only)")
+        # Log credential status
+        from nadirclaw.credentials import detect_provider, get_credential_source
+
+        for model in settings.tier_models:
+            provider = detect_provider(model)
+            if provider and provider != "ollama":
+                source = get_credential_source(provider)
+                if source:
+                    logger.info("Credential:    %s → %s", provider, source)
+                else:
+                    logger.warning("Credential:    %s → NOT CONFIGURED", provider)
+
     except Exception as e:
         logger.warning("LiteLLM setup issue: %s", e)
 
@@ -283,6 +298,15 @@ async def chat_completions(
             call_kwargs["max_tokens"] = request.max_tokens
         if request.top_p is not None:
             call_kwargs["top_p"] = request.top_p
+
+        # Resolve provider credential
+        from nadirclaw.credentials import detect_provider, get_credential
+
+        provider = detect_provider(selected_model)
+        if provider and provider != "ollama":
+            api_key = get_credential(provider)
+            if api_key:
+                call_kwargs["api_key"] = api_key
 
         logger.debug("Calling LiteLLM: model=%s", selected_model)
         response = await litellm.acompletion(**call_kwargs)
