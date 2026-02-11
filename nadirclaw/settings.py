@@ -1,0 +1,84 @@
+"""Minimal env-based configuration for NadirClaw."""
+
+import os
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+load_dotenv()
+
+
+class Settings:
+    """All configuration from environment variables."""
+
+    @property
+    def AUTH_TOKEN(self) -> str:
+        return os.getenv("NADIRCLAW_AUTH_TOKEN", "nadir-local")
+
+    @property
+    def SIMPLE_MODEL(self) -> str:
+        """Model for simple prompts. Falls back to last model in MODELS list."""
+        explicit = os.getenv("NADIRCLAW_SIMPLE_MODEL", "")
+        if explicit:
+            return explicit
+        models = self.MODELS
+        return models[-1] if models else "ollama/llama3.1:8b"
+
+    @property
+    def COMPLEX_MODEL(self) -> str:
+        """Model for complex prompts. Falls back to first model in MODELS list."""
+        explicit = os.getenv("NADIRCLAW_COMPLEX_MODEL", "")
+        if explicit:
+            return explicit
+        models = self.MODELS
+        return models[0] if models else "claude-sonnet-4-20250514"
+
+    @property
+    def MODELS(self) -> list[str]:
+        raw = os.getenv(
+            "NADIRCLAW_MODELS",
+            "claude-sonnet-4-20250514,ollama/llama3.1:8b",
+        )
+        return [m.strip() for m in raw.split(",") if m.strip()]
+
+    @property
+    def ANTHROPIC_API_KEY(self) -> str:
+        return os.getenv("ANTHROPIC_API_KEY", "")
+
+    @property
+    def OPENAI_API_KEY(self) -> str:
+        return os.getenv("OPENAI_API_KEY", "")
+
+    @property
+    def OLLAMA_API_BASE(self) -> str:
+        return os.getenv("OLLAMA_API_BASE", "http://localhost:11434")
+
+    @property
+    def CONFIDENCE_THRESHOLD(self) -> float:
+        return float(os.getenv("NADIRCLAW_CONFIDENCE_THRESHOLD", "0.06"))
+
+    @property
+    def PORT(self) -> int:
+        return int(os.getenv("NADIRCLAW_PORT", "8000"))
+
+    @property
+    def LOG_DIR(self) -> Path:
+        return Path(os.getenv("NADIRCLAW_LOG_DIR", "~/.nadirclaw/logs")).expanduser()
+
+    @property
+    def has_explicit_tiers(self) -> bool:
+        """True if SIMPLE_MODEL and COMPLEX_MODEL are explicitly set via env."""
+        return bool(
+            os.getenv("NADIRCLAW_SIMPLE_MODEL") and os.getenv("NADIRCLAW_COMPLEX_MODEL")
+        )
+
+    @property
+    def tier_models(self) -> list[str]:
+        """Deduplicated list of [COMPLEX_MODEL, SIMPLE_MODEL]."""
+        models = [self.COMPLEX_MODEL]
+        if self.SIMPLE_MODEL != self.COMPLEX_MODEL:
+            models.append(self.SIMPLE_MODEL)
+        return models
+
+
+settings = Settings()

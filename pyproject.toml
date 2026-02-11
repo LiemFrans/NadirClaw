@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nadirclaw"
+version = "0.2.0"
+description = "Open-source LLM router — simple prompts to free models, complex to premium"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+dependencies = [
+    "fastapi>=0.100.0",
+    "uvicorn>=0.20.0",
+    "litellm>=1.0.0",
+    "sentence-transformers>=2.0.0",
+    "numpy",
+    "python-dotenv",
+    "click",
+]
+
+[project.scripts]
+nadirclaw = "nadirclaw.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["nadirclaw*"]
+
+[tool.setuptools.package-data]
+nadirclaw = ["models.json"]
