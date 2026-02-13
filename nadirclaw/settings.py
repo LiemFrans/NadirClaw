@@ -5,7 +5,14 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-load_dotenv()
+# Load .env from ~/.nadirclaw/.env if it exists
+_nadirclaw_dir = Path.home() / ".nadirclaw"
+_env_file = _nadirclaw_dir / ".env"
+if _env_file.exists():
+    load_dotenv(_env_file)
+else:
+    # Fallback to current directory .env
+    load_dotenv()
 
 
 class Settings:
@@ -22,7 +29,7 @@ class Settings:
         if explicit:
             return explicit
         models = self.MODELS
-        return models[-1] if models else "ollama/llama3.1:8b"
+        return models[-1] if models else "gemini-3-flash-preview"
 
     @property
     def COMPLEX_MODEL(self) -> str:
@@ -31,13 +38,13 @@ class Settings:
         if explicit:
             return explicit
         models = self.MODELS
-        return models[0] if models else "claude-sonnet-4-20250514"
+        return models[0] if models else "openai-codex/gpt-5.3-codex"
 
     @property
     def MODELS(self) -> list[str]:
         raw = os.getenv(
             "NADIRCLAW_MODELS",
-            "claude-sonnet-4-20250514,ollama/llama3.1:8b",
+            "openai-codex/gpt-5.3-codex,gemini-3-flash-preview",
         )
         return [m.strip() for m in raw.split(",") if m.strip()]
 
@@ -50,6 +57,10 @@ class Settings:
         return os.getenv("OPENAI_API_KEY", "")
 
     @property
+    def GEMINI_API_KEY(self) -> str:
+        return os.getenv("GEMINI_API_KEY", "") or os.getenv("GOOGLE_API_KEY", "")
+
+    @property
     def OLLAMA_API_BASE(self) -> str:
         return os.getenv("OLLAMA_API_BASE", "http://localhost:11434")
 
@@ -59,7 +70,7 @@ class Settings:
 
     @property
     def PORT(self) -> int:
-        return int(os.getenv("NADIRCLAW_PORT", "8000"))
+        return int(os.getenv("NADIRCLAW_PORT", "8856"))
 
     @property
     def LOG_DIR(self) -> Path:

@@ -17,7 +17,7 @@ def main():
 
 
 @main.command()
-@click.option("--port", default=None, type=int, help="Port to listen on (default: 8000)")
+@click.option("--port", default=None, type=int, help="Port to listen on (default: 8856)")
 @click.option("--simple-model", default=None, help="Model for simple prompts")
 @click.option("--complex-model", default=None, help="Model for complex prompts")
 @click.option("--models", default=None, help="Comma-separated model list (legacy)")
@@ -63,6 +63,7 @@ def serve(port, simple_model, complex_model, models, token, verbose):
         host="0.0.0.0",
         port=actual_port,
         log_level=log_level,
+        timeout_keep_alive=120,   # keep connections alive longer (Gemini can take 15s+)
     )
 
 
@@ -202,6 +203,100 @@ def setup_token():
     click.echo("Verify with: nadirclaw auth status")
 
 
+# ---------------------------------------------------------------------------
+# nadirclaw auth openai — OpenAI subscription OAuth subgroup
+# ---------------------------------------------------------------------------
+
+@auth.group(name="openai")
+def auth_openai():
+    """OpenAI subscription commands (OAuth login with ChatGPT account)."""
+    pass
+
+
+@auth_openai.command(name="login")
+@click.option("--timeout", "-t", default=300, help="Login timeout in seconds (default: 300)")
+def openai_login(timeout):
+    """Login via OAuth — use your ChatGPT subscription, no API key needed.
+
+    Delegates to the Codex CLI (or OpenClaw) for the actual OAuth flow.
+    After login, NadirClaw reads the stored credentials automatically.
+    """
+    import time as _time
+    from nadirclaw.credentials import get_credential, get_credential_source, _read_credentials
+    from nadirclaw.oauth import login_openai, read_openclaw_codex_credentials
+
+    # First check if we already have a valid credential from any source
+    existing_token = get_credential("openai-codex")
+    existing_source = get_credential_source("openai-codex")
+    if existing_token:
+        # Check expiry from NadirClaw stored credentials
+        stored = _read_credentials().get("openai-codex", {})
+        expires_at = stored.get("expires_at", 0)
+        # Also check OpenClaw auth-profiles (uses millisecond timestamps)
+        if not expires_at:
+            openclaw_profile = read_openclaw_codex_credentials()
+            if openclaw_profile:
+                expires_at = openclaw_profile.get("expires", 0) / 1000
+
+        if expires_at and _time.time() < (expires_at - 60):
+            remaining = int(expires_at - _time.time())
+            click.echo(f"You already have valid OpenAI Codex credentials (source: {existing_source}).")
+            click.echo(f"  Token expires in: {remaining // 60} minutes")
+            click.echo("  NadirClaw will use these automatically.")
+            click.echo("\nTo force re-login, run: nadirclaw auth openai logout && nadirclaw auth openai login")
+            return
+
+    click.echo("Logging in to OpenAI via Codex CLI...")
+    click.echo("A browser window will open for you to sign in with your OpenAI account.\n")
+
+    try:
+        token_data = login_openai(timeout=timeout)
+    except RuntimeError as e:
+        click.echo(f"\nLogin failed: {e}")
+        raise SystemExit(1)
+    except Exception as e:
+        click.echo(f"\nUnexpected error during login: {e}")
+        raise SystemExit(1)
+
+    if not token_data:
+        click.echo("\nLogin did not complete successfully.")
+        raise SystemExit(1)
+
+    access_token = token_data.get("access_token", "")
+    refresh_token = token_data.get("refresh_token", "")
+    expires_at = token_data.get("expires_at", 0)
+
+    if access_token:
+        # Also save a copy in NadirClaw's credential store
+        from nadirclaw.credentials import save_oauth_credential
+        import time as _time
+        expires_in = max(int(expires_at - _time.time()), 3600) if expires_at else 3600
+        save_oauth_credential("openai-codex", access_token, refresh_token, expires_in)
+
+        click.echo("\nOpenAI login successful!")
+        mask = f"{access_token[:12]}...{access_token[-4:]}" if len(access_token) > 16 else f"{access_token[:8]}***"
+        click.echo(f"  Token: {mask}")
+        if refresh_token:
+            click.echo("  Auto-refresh: enabled")
+        click.echo("\nNadirClaw will use this token for openai-codex models.")
+        click.echo("Verify with: nadirclaw auth status")
+    else:
+        click.echo("\nLogin completed but no token was captured.")
+        click.echo("NadirClaw may still work if credentials are stored by Codex/OpenClaw.")
+        click.echo("Check with: nadirclaw auth status")
+
+
+@auth_openai.command(name="logout")
+def openai_logout():
+    """Remove stored OpenAI OAuth credential."""
+    from nadirclaw.credentials import remove_credential
+
+    if remove_credential("openai-codex"):
+        click.echo("OpenAI credential removed.")
+    else:
+        click.echo("No OpenAI credential found.")
+
+
 @auth.command(name="add")
 @click.option("--provider", "-p", default=None, help="Provider name (e.g. anthropic, openai)")
 @click.option("--key", "-k", default=None, help="API key or token")
@@ -231,21 +326,38 @@ def auth_add(provider, key):
 @auth.command(name="status")
 def auth_status():
     """Show configured credentials (tokens are masked)."""
-    from nadirclaw.credentials import list_credentials
+    import time as _time
+
+    from nadirclaw.credentials import list_credentials, _read_credentials
 
     creds = list_credentials()
     if not creds:
         click.echo("No credentials configured.")
         click.echo("\nAdd credentials with:")
+        click.echo("  nadirclaw auth openai login  # OpenAI subscription (OAuth)")
         click.echo("  nadirclaw auth setup-token   # Claude subscription token")
         click.echo("  nadirclaw auth add           # Any provider API key")
         click.echo("  Or set env vars: ANTHROPIC_API_KEY, OPENAI_API_KEY, etc.")
         return
 
+    stored = _read_credentials()
+
     click.echo("Configured Credentials")
-    click.echo("-" * 50)
+    click.echo("-" * 60)
     for c in creds:
-        click.echo(f"  {c['provider']:12s}  {c['masked_token']}  ({c['source']})")
+        line = f"  {c['provider']:14s}  {c['masked_token']}  ({c['source']})"
+        # Show OAuth expiry info
+        entry = stored.get(c["provider"], {})
+        if entry.get("source") == "oauth" and entry.get("expires_at"):
+            remaining = entry["expires_at"] - int(_time.time())
+            if remaining > 0:
+                mins = remaining // 60
+                line += f"  [expires in {mins}m]"
+            else:
+                line += "  [EXPIRED — will auto-refresh]"
+            if entry.get("refresh_token"):
+                line += "  [auto-refresh]"
+        click.echo(line)
     click.echo(f"\n{len(creds)} provider(s) configured.")
 
 
@@ -300,6 +412,7 @@ def onboard():
         "models": [
             {
                 "id": "auto",
+                "name": "auto",
                 "reasoning": True,
                 "input": ["text"],
                 "contextWindow": 200000,
