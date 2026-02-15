@@ -10,7 +10,7 @@ import click
 
 
 @click.group()
-@click.version_option(version="0.2.0", prog_name="nadirclaw")
+@click.version_option(version=None, prog_name="nadirclaw", package_name="nadirclaw")
 def main():
     """NadirClaw — Open-source LLM router."""
     pass
@@ -63,7 +63,6 @@ def serve(port, simple_model, complex_model, models, token, verbose):
         host="0.0.0.0",
         port=actual_port,
         log_level=log_level,
-        timeout_keep_alive=120,   # keep connections alive longer (Gemini can take 15s+)
     )
 
 
@@ -137,6 +136,49 @@ def status():
             click.echo(f"\nServer:        RUNNING ({data.get('status', '?')})")
     except Exception:
         click.echo("\nServer:        NOT RUNNING")
+
+
+@main.command()
+@click.option("--since", default=None, help="Time filter: '24h', '7d', '2025-02-01'")
+@click.option("--model", default=None, help="Filter by model name (substring match)")
+@click.option("--format", "fmt", default="text", type=click.Choice(["text", "json"]), help="Output format")
+@click.option("--export", "export_path", default=None, type=click.Path(), help="Export report to file")
+def report(since, model, fmt, export_path):
+    """Show a summary report of request logs."""
+    from nadirclaw.report import (
+        format_report_text,
+        generate_report,
+        load_log_entries,
+        parse_since,
+    )
+    from nadirclaw.settings import settings
+
+    log_path = settings.LOG_DIR / "requests.jsonl"
+    if not log_path.exists():
+        click.echo("No log file found. Start the server and make some requests first.")
+        return
+
+    since_dt = None
+    if since:
+        try:
+            since_dt = parse_since(since)
+        except ValueError as e:
+            click.echo(f"Error: {e}")
+            raise SystemExit(1)
+
+    entries = load_log_entries(log_path, since=since_dt, model_filter=model)
+    report_data = generate_report(entries)
+
+    if fmt == "json":
+        output = json.dumps(report_data, indent=2, default=str)
+    else:
+        output = format_report_text(report_data)
+
+    if export_path:
+        Path(export_path).write_text(output)
+        click.echo(f"Report exported to {export_path}")
+    else:
+        click.echo(output)
 
 
 @main.command(name="build-centroids")
@@ -218,12 +260,11 @@ def auth_openai():
 def openai_login(timeout):
     """Login via OAuth — use your ChatGPT subscription, no API key needed.
 
-    Delegates to the Codex CLI (or OpenClaw) for the actual OAuth flow.
-    After login, NadirClaw reads the stored credentials automatically.
+    Opens a browser for OAuth authorization. No external CLIs required.
     """
     import time as _time
     from nadirclaw.credentials import get_credential, get_credential_source, _read_credentials
-    from nadirclaw.oauth import login_openai, read_openclaw_codex_credentials
+    from nadirclaw.oauth import login_openai
 
     # First check if we already have a valid credential from any source
     existing_token = get_credential("openai-codex")
@@ -232,11 +273,7 @@ def openai_login(timeout):
         # Check expiry from NadirClaw stored credentials
         stored = _read_credentials().get("openai-codex", {})
         expires_at = stored.get("expires_at", 0)
-        # Also check OpenClaw auth-profiles (uses millisecond timestamps)
-        if not expires_at:
-            openclaw_profile = read_openclaw_codex_credentials()
-            if openclaw_profile:
-                expires_at = openclaw_profile.get("expires", 0) / 1000
+
 
         if expires_at and _time.time() < (expires_at - 60):
             remaining = int(expires_at - _time.time())
@@ -246,7 +283,7 @@ def openai_login(timeout):
             click.echo("\nTo force re-login, run: nadirclaw auth openai logout && nadirclaw auth openai login")
             return
 
-    click.echo("Logging in to OpenAI via Codex CLI...")
+    click.echo("Logging in to OpenAI...")
     click.echo("A browser window will open for you to sign in with your OpenAI account.\n")
 
     try:
@@ -282,7 +319,6 @@ def openai_login(timeout):
         click.echo("Verify with: nadirclaw auth status")
     else:
         click.echo("\nLogin completed but no token was captured.")
-        click.echo("NadirClaw may still work if credentials are stored by Codex/OpenClaw.")
         click.echo("Check with: nadirclaw auth status")
 
 
@@ -295,6 +331,282 @@ def openai_logout():
         click.echo("OpenAI credential removed.")
     else:
         click.echo("No OpenAI credential found.")
+
+
+# ---------------------------------------------------------------------------
+# nadirclaw auth anthropic — Anthropic subscription OAuth subgroup
+# ---------------------------------------------------------------------------
+
+@auth.group(name="anthropic")
+def auth_anthropic():
+    """Anthropic commands (setup token or API key)."""
+    pass
+
+
+@auth_anthropic.command(name="login")
+def anthropic_login():
+    """Add Anthropic credentials — choose between setup token or API key."""
+    from nadirclaw.credentials import get_credential, get_credential_source, save_credential
+    from nadirclaw.oauth import validate_anthropic_setup_token
+
+    # First check if we already have a valid credential from any source
+    existing_token = get_credential("anthropic")
+    existing_source = get_credential_source("anthropic")
+    if existing_token:
+        click.echo(f"You already have Anthropic credentials (source: {existing_source}).")
+        click.echo("  NadirClaw will use these automatically.")
+        if not click.confirm("\nReplace existing credentials?", default=False):
+            return
+
+    # Ask user which auth method they want
+    click.echo("\nHow would you like to authenticate with Anthropic?\n")
+    click.echo("  1. Setup token  — use your Claude subscription (run `claude setup-token`)")
+    click.echo("  2. API key      — use an Anthropic API key")
+    click.echo()
+
+    choice = click.prompt(
+        "Choose",
+        type=click.Choice(["1", "2"], case_sensitive=False),
+        default="1",
+    )
+
+    if choice == "1":
+        # Setup token flow
+        click.echo("\n--- Setup Token ---")
+        click.echo("1. Open another terminal and run:  claude setup-token")
+        click.echo("2. Copy the generated token (starts with sk-ant-oat01-...)")
+        click.echo("3. Paste it below\n")
+
+        token = click.prompt("Paste Anthropic setup-token", hide_input=True)
+        token = token.strip()
+
+        error = validate_anthropic_setup_token(token)
+        if error:
+            click.echo(f"\nInvalid token: {error}")
+            raise SystemExit(1)
+
+        save_credential("anthropic", token, source="setup-token")
+
+        click.echo("\nAnthropic login successful!")
+        mask = f"{token[:16]}...{token[-4:]}" if len(token) > 20 else f"{token[:8]}***"
+        click.echo(f"  Token: {mask}")
+        click.echo("  Source: setup-token")
+
+    else:
+        # API key flow
+        click.echo()
+        key = click.prompt("Enter Anthropic API key", hide_input=True)
+        key = key.strip()
+
+        if not key:
+            click.echo("Error: empty key provided.")
+            raise SystemExit(1)
+
+        save_credential("anthropic", key, source="manual")
+
+        click.echo("\nAnthropic API key saved!")
+        mask = f"{key[:8]}...{key[-4:]}" if len(key) > 12 else f"{key[:4]}***"
+        click.echo(f"  Key: {mask}")
+        click.echo("  Source: api-key")
+
+    click.echo("\nNadirClaw will use this for Anthropic/Claude models.")
+    click.echo("Verify with: nadirclaw auth status")
+
+
+@auth_anthropic.command(name="logout")
+def anthropic_logout():
+    """Remove stored Anthropic OAuth credential."""
+    from nadirclaw.credentials import remove_credential
+
+    if remove_credential("anthropic"):
+        click.echo("Anthropic credential removed.")
+    else:
+        click.echo("No Anthropic credential found.")
+
+
+# ---------------------------------------------------------------------------
+# nadirclaw auth antigravity — Google Antigravity OAuth subgroup
+# ---------------------------------------------------------------------------
+
+@auth.group(name="antigravity")
+def auth_antigravity():
+    """Google Antigravity subscription commands (OAuth login with Google account)."""
+    pass
+
+
+@auth_antigravity.command(name="login")
+@click.option("--timeout", "-t", default=300, help="Login timeout in seconds (default: 300)")
+def antigravity_login(timeout):
+    """Login via OAuth — use your Google account, no API key needed.
+
+    Opens a browser for OAuth authorization. No external CLIs or env vars required.
+    """
+    import time as _time
+    from nadirclaw.credentials import get_credential, get_credential_source, _read_credentials
+    from nadirclaw.oauth import login_antigravity
+
+    # First check if we already have a valid credential
+    existing_token = get_credential("antigravity")
+    existing_source = get_credential_source("antigravity")
+    if existing_token:
+        stored = _read_credentials().get("antigravity", {})
+        expires_at = stored.get("expires_at", 0)
+        if expires_at and _time.time() < (expires_at - 60):
+            remaining = int(expires_at - _time.time())
+            click.echo(f"You already have valid Antigravity credentials (source: {existing_source}).")
+            click.echo(f"  Token expires in: {remaining // 60} minutes")
+            click.echo("  NadirClaw will use these automatically.")
+            click.echo("\nTo force re-login, run: nadirclaw auth antigravity logout && nadirclaw auth antigravity login")
+            return
+
+    click.echo("Logging in to Google Antigravity...")
+    click.echo("A browser window will open for you to sign in with your Google account.\n")
+
+    try:
+        token_data = login_antigravity(timeout=timeout)
+    except RuntimeError as e:
+        click.echo(f"\nLogin failed: {e}")
+        raise SystemExit(1)
+    except Exception as e:
+        click.echo(f"\nUnexpected error during login: {e}")
+        raise SystemExit(1)
+
+    if not token_data:
+        click.echo("\nLogin did not complete successfully.")
+        raise SystemExit(1)
+
+    access_token = token_data.get("access_token", "")
+    refresh_token = token_data.get("refresh_token", "")
+    expires_at = token_data.get("expires_at", 0)
+    project_id = token_data.get("project_id", "")
+    email = token_data.get("email", "")
+
+    if access_token:
+        from nadirclaw.credentials import save_oauth_credential
+        expires_in = max(int(expires_at - _time.time()), 3600) if expires_at else 3600
+        save_oauth_credential("antigravity", access_token, refresh_token, expires_in, metadata={
+            "project_id": project_id,
+            "email": email,
+        })
+
+        click.echo("\nAntigravity login successful!")
+        mask = f"{access_token[:12]}...{access_token[-4:]}" if len(access_token) > 16 else f"{access_token[:8]}***"
+        click.echo(f"  Token: {mask}")
+        if refresh_token:
+            click.echo("  Auto-refresh: enabled")
+        if project_id:
+            click.echo(f"  Project ID: {project_id}")
+        if email:
+            click.echo(f"  Email: {email}")
+        click.echo("\nNadirClaw will use this token for Antigravity models.")
+        click.echo("Verify with: nadirclaw auth status")
+    else:
+        click.echo("\nLogin completed but no token was captured.")
+        click.echo("Check with: nadirclaw auth status")
+
+
+@auth_antigravity.command(name="logout")
+def antigravity_logout():
+    """Remove stored Antigravity OAuth credential."""
+    from nadirclaw.credentials import remove_credential
+
+    if remove_credential("antigravity"):
+        click.echo("Antigravity credential removed.")
+    else:
+        click.echo("No Antigravity credential found.")
+
+
+# ---------------------------------------------------------------------------
+# nadirclaw auth gemini-cli — Google Gemini CLI OAuth subgroup
+# ---------------------------------------------------------------------------
+
+@auth.group(name="gemini")
+def auth_gemini():
+    """Google Gemini subscription commands (OAuth login with Google account)."""
+    pass
+
+
+@auth_gemini.command(name="login")
+@click.option("--timeout", "-t", default=300, help="Login timeout in seconds (default: 300)")
+def gemini_login(timeout):
+    """Login via OAuth — use your Google account, no API key needed.
+
+    Opens a browser for OAuth authorization. Requires the Gemini CLI to be
+    installed so NadirClaw can extract OAuth client credentials.
+    """
+    import time as _time
+    from nadirclaw.credentials import get_credential, get_credential_source, _read_credentials
+    from nadirclaw.oauth import login_gemini
+
+    # First check if we already have a valid credential
+    existing_token = get_credential("gemini")
+    existing_source = get_credential_source("gemini")
+    if existing_token:
+        stored = _read_credentials().get("gemini", {})
+        expires_at = stored.get("expires_at", 0)
+        if expires_at and _time.time() < (expires_at - 60):
+            remaining = int(expires_at - _time.time())
+            click.echo(f"You already have valid Gemini credentials (source: {existing_source}).")
+            click.echo(f"  Token expires in: {remaining // 60} minutes")
+            click.echo("  NadirClaw will use these automatically.")
+            click.echo("\nTo force re-login, run: nadirclaw auth gemini logout && nadirclaw auth gemini login")
+            return
+
+    click.echo("Logging in to Google Gemini...")
+    click.echo("A browser window will open for you to sign in with your Google account.\n")
+
+    try:
+        token_data = login_gemini(timeout=timeout)
+    except RuntimeError as e:
+        click.echo(f"\nLogin failed: {e}")
+        raise SystemExit(1)
+    except Exception as e:
+        click.echo(f"\nUnexpected error during login: {e}")
+        raise SystemExit(1)
+
+    if not token_data:
+        click.echo("\nLogin did not complete successfully.")
+        raise SystemExit(1)
+
+    access_token = token_data.get("access_token", "")
+    refresh_token = token_data.get("refresh_token", "")
+    expires_at = token_data.get("expires_at", 0)
+    project_id = token_data.get("project_id", "")
+    email = token_data.get("email", "")
+
+    if access_token:
+        from nadirclaw.credentials import save_oauth_credential
+        expires_in = max(int(expires_at - _time.time()), 3600) if expires_at else 3600
+        save_oauth_credential("gemini", access_token, refresh_token, expires_in, metadata={
+            "project_id": project_id,
+            "email": email,
+        })
+
+        click.echo("\nGemini login successful!")
+        mask = f"{access_token[:12]}...{access_token[-4:]}" if len(access_token) > 16 else f"{access_token[:8]}***"
+        click.echo(f"  Token: {mask}")
+        if refresh_token:
+            click.echo("  Auto-refresh: enabled")
+        if project_id:
+            click.echo(f"  Project ID: {project_id}")
+        if email:
+            click.echo(f"  Email: {email}")
+        click.echo("\nNadirClaw will use this token for Gemini models.")
+        click.echo("Verify with: nadirclaw auth status")
+    else:
+        click.echo("\nLogin completed but no token was captured.")
+        click.echo("Check with: nadirclaw auth status")
+
+
+@auth_gemini.command(name="logout")
+def gemini_logout():
+    """Remove stored Gemini OAuth credential."""
+    from nadirclaw.credentials import remove_credential
+
+    if remove_credential("gemini"):
+        click.echo("Gemini credential removed.")
+    else:
+        click.echo("No Gemini credential found.")
 
 
 @auth.command(name="add")
@@ -326,38 +638,25 @@ def auth_add(provider, key):
 @auth.command(name="status")
 def auth_status():
     """Show configured credentials (tokens are masked)."""
-    import time as _time
-
-    from nadirclaw.credentials import list_credentials, _read_credentials
+    from nadirclaw.credentials import list_credentials
 
     creds = list_credentials()
     if not creds:
-        click.echo("No credentials configured.")
-        click.echo("\nAdd credentials with:")
-        click.echo("  nadirclaw auth openai login  # OpenAI subscription (OAuth)")
-        click.echo("  nadirclaw auth setup-token   # Claude subscription token")
-        click.echo("  nadirclaw auth add           # Any provider API key")
-        click.echo("  Or set env vars: ANTHROPIC_API_KEY, OPENAI_API_KEY, etc.")
-        return
-
-    stored = _read_credentials()
+            click.echo("No credentials configured.")
+            click.echo("\nAdd credentials with:")
+            click.echo("  nadirclaw auth openai login      # OpenAI subscription (OAuth)")
+            click.echo("  nadirclaw auth anthropic login    # Anthropic subscription (OAuth)")
+            click.echo("  nadirclaw auth antigravity login # Google Antigravity (OAuth)")
+            click.echo("  nadirclaw auth gemini login   # Google Gemini (OAuth)")
+            click.echo("  nadirclaw auth setup-token        # Claude subscription token")
+            click.echo("  nadirclaw auth add                # Any provider API key")
+            click.echo("  Or set env vars: ANTHROPIC_API_KEY, OPENAI_API_KEY, etc.")
+            return
 
     click.echo("Configured Credentials")
-    click.echo("-" * 60)
+    click.echo("-" * 50)
     for c in creds:
-        line = f"  {c['provider']:14s}  {c['masked_token']}  ({c['source']})"
-        # Show OAuth expiry info
-        entry = stored.get(c["provider"], {})
-        if entry.get("source") == "oauth" and entry.get("expires_at"):
-            remaining = entry["expires_at"] - int(_time.time())
-            if remaining > 0:
-                mins = remaining // 60
-                line += f"  [expires in {mins}m]"
-            else:
-                line += "  [EXPIRED — will auto-refresh]"
-            if entry.get("refresh_token"):
-                line += "  [auto-refresh]"
-        click.echo(line)
+        click.echo(f"  {c['provider']:12s}  {c['masked_token']}  ({c['source']})")
     click.echo(f"\n{len(creds)} provider(s) configured.")
 
 
@@ -412,7 +711,6 @@ def onboard():
         "models": [
             {
                 "id": "auto",
-                "name": "auto",
                 "reasoning": True,
                 "input": ["text"],
                 "contextWindow": 200000,

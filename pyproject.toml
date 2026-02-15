@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nadirclaw"
-version = "0.2.0"
+dynamic = ["version"]
 description = "Open-source LLM router — simple prompts to free models, complex to premium"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -27,5 +27,25 @@ nadirclaw = "nadirclaw.cli:main"
 [tool.setuptools.packages.find]
 include = ["nadirclaw*"]
 
+[tool.setuptools.dynamic]
+version = {attr = "nadirclaw.__version__"}
+
 [tool.setuptools.package-data]
 nadirclaw = ["*.npy"]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+    "httpx",
+]
+telemetry = [
+    "opentelemetry-api>=1.20.0",
+    "opentelemetry-sdk>=1.20.0",
+    "opentelemetry-exporter-otlp-proto-grpc>=1.20.0",
+    "opentelemetry-instrumentation-fastapi>=0.41b0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

@@ -19,6 +19,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
+from nadirclaw import __version__
 from nadirclaw.auth import UserSession, validate_local_auth
 from nadirclaw.settings import settings
 
@@ -44,7 +45,7 @@ class RateLimitExhausted(Exception):
 
 app = FastAPI(
     title="NadirClaw",
-    version="0.2.0",
+    version=__version__,
     description="Open-source LLM router — simple prompts to free models, complex to premium",
 )
 
@@ -148,6 +149,31 @@ def _log_request(entry: Dict[str, Any]) -> None:
     )
 
 
+def _extract_request_metadata(request: ChatCompletionRequest) -> Dict[str, Any]:
+    """Extract structured metadata from a ChatCompletionRequest for logging."""
+    messages = request.messages
+    system_msgs = [m for m in messages if m.role in ("system", "developer")]
+    has_system = bool(system_msgs)
+    system_len = sum(len(m.text_content()) for m in system_msgs) if has_system else 0
+
+    # Tool definitions from model_extra (OpenAI-style "tools" field)
+    extra = request.model_extra or {}
+    tool_defs = extra.get("tools") or []
+    # Tool-role messages (tool results in conversation)
+    tool_msgs = [m for m in messages if m.role == "tool"]
+    tool_count = len(tool_defs) + len(tool_msgs)
+
+    return {
+        "stream": bool(request.stream),
+        "message_count": len(messages),
+        "has_system_prompt": has_system,
+        "system_prompt_length": system_len,
+        "has_tools": tool_count > 0,
+        "tool_count": tool_count,
+        "requested_model": request.model,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Startup
 # ---------------------------------------------------------------------------
@@ -162,6 +188,12 @@ async def startup():
     logger.info("NadirClaw starting...")
     logger.info("Log file: %s", request_log.resolve())
     logger.info("=" * 60)
+
+    # Optional OpenTelemetry
+    from nadirclaw.telemetry import instrument_fastapi, setup_telemetry
+
+    if setup_telemetry("nadirclaw"):
+        instrument_fastapi(app)
 
     # Warm up the binary classifier
     try:
@@ -217,29 +249,35 @@ async def _smart_route_analysis(
 ) -> tuple:
     """Run classifier, return (selected_model, analysis_dict). No LLM call."""
     from nadirclaw.classifier import get_binary_classifier
+    from nadirclaw.telemetry import trace_span
 
-    analyzer = get_binary_classifier()
-    result = await analyzer.analyze(text=prompt, system_message=system_message)
+    with trace_span("smart_route_analysis") as span:
+        analyzer = get_binary_classifier()
+        result = await analyzer.analyze(text=prompt, system_message=system_message)
 
-    is_complex = result.get("tier_name") == "complex"
-    selected = settings.COMPLEX_MODEL if is_complex else settings.SIMPLE_MODEL
+        is_complex = result.get("tier_name") == "complex"
+        selected = settings.COMPLEX_MODEL if is_complex else settings.SIMPLE_MODEL
 
-    analysis = {
-        "strategy": "smart-routing",
-        "analyzer": result.get("analyzer_type", "binary"),
-        "selected_model": selected,
-        "complexity_score": result.get("complexity_score"),
-        "tier": result.get("tier_name"),
-        "confidence": result.get("confidence"),
-        "reasoning": result.get("reasoning"),
-        "classifier_latency_ms": result.get("analyzer_latency_ms"),
-        "simple_model": settings.SIMPLE_MODEL,
-        "complex_model": settings.COMPLEX_MODEL,
-        "ranked_models": [
-            {"model": m.get("model_name"), "score": m.get("suitability_score")}
-            for m in result.get("ranked_models", [])[:5]
-        ],
-    }
+        analysis = {
+            "strategy": "smart-routing",
+            "analyzer": result.get("analyzer_type", "binary"),
+            "selected_model": selected,
+            "complexity_score": result.get("complexity_score"),
+            "tier": result.get("tier_name"),
+            "confidence": result.get("confidence"),
+            "reasoning": result.get("reasoning"),
+            "classifier_latency_ms": result.get("analyzer_latency_ms"),
+            "simple_model": settings.SIMPLE_MODEL,
+            "complex_model": settings.COMPLEX_MODEL,
+            "ranked_models": [
+                {"model": m.get("model_name"), "score": m.get("suitability_score")}
+                for m in result.get("ranked_models", [])[:5]
+            ],
+        }
+
+        if span:
+            span.set_attribute("nadirclaw.tier", analysis["tier"] or "")
+            span.set_attribute("nadirclaw.selected_model", selected)
 
     return selected, analysis
 
@@ -574,9 +612,12 @@ async def _dispatch_model(
 
     Raises RateLimitExhausted if the model is rate-limited after retries.
     """
-    if provider == "google":
-        return await _call_gemini(model, request, provider)
-    return await _call_litellm(model, request, provider)
+    from nadirclaw.telemetry import trace_span
+
+    with trace_span("dispatch_model", {"gen_ai.request.model": model, "gen_ai.system": provider or ""}):
+        if provider == "google":
+            return await _call_gemini(model, request, provider)
+        return await _call_litellm(model, request, provider)
 
 
 async def _call_with_fallback(
@@ -680,6 +721,9 @@ async def chat_completions(
         user_msgs = [m.text_content() for m in request.messages if m.role == "user"]
         prompt_text = user_msgs[-1] if user_msgs else ""
 
+        # Extract request metadata for enhanced logging
+        req_meta = _extract_request_metadata(request)
+
         # Route
         if request.model and request.model != "auto":
             selected_model = request.model
@@ -703,17 +747,32 @@ async def chat_completions(
         # ------------------------------------------------------------------
         # Call model — with automatic fallback on rate limit
         # ------------------------------------------------------------------
-        response_data, selected_model, analysis_info = await _call_with_fallback(
-            selected_model, request, provider, analysis_info,
-        )
+        from nadirclaw.telemetry import record_llm_call, trace_span
 
-        elapsed_ms = int((time.time() - start_time) * 1000)
+        with trace_span("chat_completion", {"nadirclaw.tier": analysis_info.get("tier")}) as span:
+            response_data, selected_model, analysis_info = await _call_with_fallback(
+                selected_model, request, provider, analysis_info,
+            )
+
+            elapsed_ms = int((time.time() - start_time) * 1000)
+            total_tokens = response_data["prompt_tokens"] + response_data["completion_tokens"]
+
+            record_llm_call(
+                span,
+                model=selected_model,
+                provider=provider,
+                prompt_tokens=response_data["prompt_tokens"],
+                completion_tokens=response_data["completion_tokens"],
+                tier=analysis_info.get("tier"),
+                latency_ms=elapsed_ms,
+            )
 
         _log_request({
             "type": "completion",
             "request_id": request_id,
             "prompt": prompt_text,
             "selected_model": selected_model,
+            "provider": provider,
             "tier": analysis_info.get("tier"),
             "confidence": analysis_info.get("confidence"),
             "complexity_score": analysis_info.get("complexity_score"),
@@ -721,8 +780,11 @@ async def chat_completions(
             "total_latency_ms": elapsed_ms,
             "prompt_tokens": response_data["prompt_tokens"],
             "completion_tokens": response_data["completion_tokens"],
+            "total_tokens": total_tokens,
             "response_preview": (response_data["content"] or "")[:100],
             "fallback_used": analysis_info.get("fallback_from"),
+            "status": "ok",
+            **req_meta,
         })
 
         # ------------------------------------------------------------------
@@ -764,7 +826,15 @@ async def chat_completions(
         }
 
     except Exception as e:
+        elapsed_ms = int((time.time() - start_time) * 1000)
         logger.error("Completion error: %s", e, exc_info=True)
+        _log_request({
+            "type": "completion",
+            "request_id": request_id,
+            "status": "error",
+            "error": str(e),
+            "total_latency_ms": elapsed_ms,
+        })
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -882,7 +952,7 @@ async def list_models(
 async def health():
     return {
         "status": "ok",
-        "version": "0.2.0",
+        "version": __version__,
         "simple_model": settings.SIMPLE_MODEL,
         "complex_model": settings.COMPLEX_MODEL,
     }
@@ -892,7 +962,7 @@ async def health():
 async def root():
     return {
         "name": "NadirClaw",
-        "version": "0.2.0",
+        "version": __version__,
         "description": "Open-source LLM router",
         "status": "ok",
     }
