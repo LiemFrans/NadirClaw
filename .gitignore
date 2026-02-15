@@ -29,3 +29,10 @@ logs/
 
 # Model cache
 .cache/
+.claude/
+.gemini/
+.cursor/
+
+# NadirClaw credentials (prevent accidental commits)
+.nadirclaw/
+credentials.json

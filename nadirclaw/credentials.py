@@ -1,13 +1,16 @@
 """Credential storage and resolution for NadirClaw.
 
 Stores provider API keys/tokens in ~/.nadirclaw/credentials.json.
-Resolution chain: OpenClaw stored token → NadirClaw stored token → env var.
-Supports OAuth tokens with automatic refresh for openai-codex.
+Resolution chain: OpenClaw stored token (optional) → NadirClaw stored token → env var.
+Supports OAuth tokens with automatic refresh for all providers.
+OpenClaw integration is optional — NadirClaw works standalone.
 """
 
 import json
 import logging
 import os
+import platform
+import tempfile
 import time
 from pathlib import Path
 from typing import Optional
@@ -42,6 +45,7 @@ _MODEL_PROVIDER_PATTERNS = {
     "o4-": "openai",
     "gemini/": "google",
     "gemini-": "google",
+    "antigravity/": "antigravity",
     "ollama/": "ollama",
     "cohere/": "cohere",
     "mistral/": "mistral",
@@ -68,9 +72,27 @@ def _read_credentials() -> dict:
 def _write_credentials(data: dict) -> None:
     path = _credentials_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2) + "\n")
-    # Restrict permissions to owner only
-    path.chmod(0o600)
+
+    # Atomic write: write to temp file then rename to prevent partial writes
+    # on concurrent access or crashes.
+    fd, tmp_path = tempfile.mkstemp(
+        dir=str(path.parent), suffix=".tmp", prefix=".creds-"
+    )
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(json.dumps(data, indent=2) + "\n")
+        os.replace(tmp_path, str(path))
+    except Exception:
+        # Clean up temp file on failure
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+    # Restrict permissions to owner only (Unix)
+    if platform.system() != "Windows":
+        path.chmod(0o600)
 
 
 def save_credential(provider: str, token: str, source: str = "manual") -> None:
@@ -91,6 +113,7 @@ def save_oauth_credential(
     access_token: str,
     refresh_token: str,
     expires_in: int,
+    metadata: Optional[dict] = None,
 ) -> None:
     """Save an OAuth credential with refresh token and expiry.
 
@@ -107,6 +130,9 @@ def save_oauth_credential(
         "expires_at": int(time.time()) + expires_in,
         "source": "oauth",
     }
+    # Add metadata (e.g., project_id, tier, email for Antigravity)
+    if metadata:
+        creds[provider].update(metadata)
     _write_credentials(creds)
 
 
@@ -120,50 +146,27 @@ def remove_credential(provider: str) -> bool:
     return False
 
 
-def _check_openclaw(provider: str) -> Optional[str]:
-    """Check OpenClaw config for a stored token.
 
-    Checks two locations:
-      1. ~/.openclaw/agents/main/agent/auth-profiles.json  (OAuth tokens — access, refresh, expires)
-      2. ~/.openclaw/openclaw.json  (legacy key storage)
-    """
-    # --- 1. auth-profiles.json (where OpenClaw actually stores OAuth tokens) ---
-    auth_profiles_path = (
-        Path.home() / ".openclaw" / "agents" / "main" / "agent" / "auth-profiles.json"
+
+
+def _get_refresh_func(provider: str):
+    """Return the appropriate token refresh function for a provider."""
+    from nadirclaw.oauth import (
+        refresh_openai_token,
+        refresh_anthropic_token,
+        refresh_gemini_token,
+        refresh_antigravity_token,
     )
-    if auth_profiles_path.exists():
-        try:
-            data = json.loads(auth_profiles_path.read_text())
-            profiles = data.get("profiles", {})
-            for profile in profiles.values():
-                if profile.get("provider") == provider:
-                    # OAuth profiles use "access" key
-                    token = profile.get("access") or profile.get("token") or profile.get("key")
-                    if token:
-                        return token
-        except (json.JSONDecodeError, OSError, KeyError):
-            pass
 
-    # --- 2. openclaw.json (legacy / API key style) ---
-    openclaw_path = Path.home() / ".openclaw" / "openclaw.json"
-    if not openclaw_path.exists():
-        return None
-    try:
-        config = json.loads(openclaw_path.read_text())
-        # Check auth profiles in the main config
-        auth = config.get("auth", {})
-        profiles = auth.get("profiles", {})
-        for profile in profiles.values():
-            if profile.get("provider") == provider and profile.get("token"):
-                return profile["token"]
-        # Check provider-specific keys
-        keys = auth.get("keys", {})
-        env_name = _ENV_VAR_MAP.get(provider, "")
-        if env_name and keys.get(env_name):
-            return keys[env_name]
-    except (json.JSONDecodeError, OSError, KeyError):
-        pass
-    return None
+    _REFRESH_MAP = {
+        "openai": refresh_openai_token,
+        "openai-codex": refresh_openai_token,
+        "anthropic": refresh_anthropic_token,
+        "gemini": refresh_gemini_token,
+        "google": refresh_gemini_token,
+        "antigravity": refresh_antigravity_token,
+    }
+    return _REFRESH_MAP.get(provider)
 
 
 def _maybe_refresh_oauth(provider: str, entry: dict) -> Optional[str]:
@@ -185,82 +188,36 @@ def _maybe_refresh_oauth(provider: str, entry: dict) -> Optional[str]:
         logger.warning("OAuth token expired for %s but no refresh token available", provider)
         return entry.get("token")  # return stale token; the API will reject it
 
+    refresh_func = _get_refresh_func(provider)
+    if not refresh_func:
+        logger.warning("No refresh function for provider %s", provider)
+        return entry.get("token")
+
     logger.info("Refreshing expired OAuth token for %s...", provider)
     try:
-        from nadirclaw.oauth import refresh_access_token
-
-        token_data = refresh_access_token(refresh_token)
+        token_data = refresh_func(refresh_token)
         new_access = token_data["access_token"]
         new_refresh = token_data.get("refresh_token", refresh_token)
         new_expires = token_data.get("expires_in", 3600)
 
-        save_oauth_credential(provider, new_access, new_refresh, new_expires)
+        # Preserve metadata (project_id, email, etc.)
+        metadata = {}
+        for key in ("project_id", "email", "tier"):
+            if key in entry:
+                metadata[key] = entry[key]
+
+        save_oauth_credential(provider, new_access, new_refresh, new_expires, metadata=metadata or None)
         logger.info("OAuth token refreshed for %s (expires in %ds)", provider, new_expires)
         return new_access
     except Exception as e:
         logger.error("Failed to refresh OAuth token for %s: %s", provider, e)
-        return entry.get("token")  # return stale token as last resort
-
-
-def _check_openclaw_with_refresh(provider: str) -> Optional[str]:
-    """Check OpenClaw auth-profiles for a token, refreshing if expired.
-
-    OpenClaw stores OAuth tokens with 'access', 'refresh', 'expires' (ms) fields.
-    This function reads them and auto-refreshes expired tokens.
-    """
-    auth_profiles_path = (
-        Path.home() / ".openclaw" / "agents" / "main" / "agent" / "auth-profiles.json"
-    )
-    if not auth_profiles_path.exists():
+        logger.warning(
+            "Re-authenticate with: nadirclaw auth %s login", provider
+        )
         return None
 
-    try:
-        data = json.loads(auth_profiles_path.read_text())
-        profiles = data.get("profiles", {})
-        for profile in profiles.values():
-            if profile.get("provider") != provider:
-                continue
-            if profile.get("type") != "oauth":
-                # API key profile — return the key directly
-                return profile.get("key") or profile.get("access")
 
-            access_token = profile.get("access")
-            refresh_tok = profile.get("refresh")
-            # OpenClaw stores expires in milliseconds
-            expires_ms = profile.get("expires", 0)
-            expires_at = expires_ms / 1000  # convert to seconds
 
-            if not access_token:
-                continue
-
-            # Check if token is still valid (with 60s buffer)
-            if time.time() < (expires_at - 60):
-                return access_token
-
-            # Token expired — try to refresh
-            if not refresh_tok:
-                logger.warning("OpenClaw token expired for %s, no refresh token", provider)
-                return access_token
-
-            logger.info("Refreshing expired OpenClaw token for %s...", provider)
-            try:
-                from nadirclaw.oauth import refresh_access_token
-                token_data = refresh_access_token(refresh_tok)
-                new_access = token_data["access_token"]
-                # Also save to NadirClaw's own credential store
-                new_refresh = token_data.get("refresh_token", refresh_tok)
-                new_expires_in = token_data.get("expires_in", 3600)
-                save_oauth_credential(provider, new_access, new_refresh, new_expires_in)
-                logger.info("Token refreshed for %s (expires in %ds)", provider, new_expires_in)
-                return new_access
-            except Exception as e:
-                logger.error("Failed to refresh OpenClaw token for %s: %s", provider, e)
-                return access_token  # return stale token as last resort
-
-    except (json.JSONDecodeError, OSError, KeyError) as e:
-        logger.debug("Could not read OpenClaw auth-profiles: %s", e)
-
-    return None
 
 
 def get_credential(provider: str) -> Optional[str]:
@@ -279,15 +236,9 @@ def get_credential(provider: str) -> Optional[str]:
     Returns:
         The token string, or None if no credential found.
     """
-    # 1. OpenClaw auth-profiles (with auto-refresh for OAuth tokens)
-    token = _check_openclaw_with_refresh(provider)
-    if token:
-        return token
 
-    # 1b. OpenClaw legacy (openclaw.json)
-    token = _check_openclaw(provider)
-    if token:
-        return token
+
+
 
     # 2. NadirClaw stored credentials (with OAuth auto-refresh)
     creds = _read_credentials()
@@ -316,9 +267,7 @@ def get_credential_source(provider: str) -> Optional[str]:
 
     Returns one of: "openclaw", "oauth", "setup-token", "manual", "env", or None.
     """
-    # 1. OpenClaw (auth-profiles with OAuth + legacy)
-    if _check_openclaw_with_refresh(provider) or _check_openclaw(provider):
-        return "openclaw"
+
 
     # 2. NadirClaw stored
     creds = _read_credentials()
