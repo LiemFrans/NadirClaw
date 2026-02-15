@@ -23,7 +23,8 @@ def main():
 @click.option("--models", default=None, help="Comma-separated model list (legacy)")
 @click.option("--token", default=None, help="Auth token")
 @click.option("--verbose", is_flag=True, help="Enable verbose logging")
-def serve(port, simple_model, complex_model, models, token, verbose):
+@click.option("--log-raw", is_flag=True, help="Log full raw requests and responses to JSONL")
+def serve(port, simple_model, complex_model, models, token, verbose, log_raw):
     """Start the NadirClaw router server."""
     import logging
 
@@ -42,6 +43,8 @@ def serve(port, simple_model, complex_model, models, token, verbose):
         os.environ["NADIRCLAW_MODELS"] = models
     if token:
         os.environ["NADIRCLAW_AUTH_TOKEN"] = token
+    if log_raw:
+        os.environ["NADIRCLAW_LOG_RAW"] = "true"
 
     log_level = "debug" if verbose else "info"
     logging.basicConfig(

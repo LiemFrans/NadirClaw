@@ -73,6 +73,11 @@ class Settings:
         return int(os.getenv("NADIRCLAW_PORT", "8856"))
 
     @property
+    def LOG_RAW(self) -> bool:
+        """When True, log full raw request messages and response content."""
+        return os.getenv("NADIRCLAW_LOG_RAW", "").lower() in ("1", "true", "yes")
+
+    @property
     def LOG_DIR(self) -> Path:
         return Path(os.getenv("NADIRCLAW_LOG_DIR", "~/.nadirclaw/logs")).expanduser()
 

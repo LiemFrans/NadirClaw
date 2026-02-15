@@ -767,7 +767,7 @@ async def chat_completions(
                 latency_ms=elapsed_ms,
             )
 
-        _log_request({
+        log_entry = {
             "type": "completion",
             "request_id": request_id,
             "prompt": prompt_text,
@@ -785,7 +785,15 @@ async def chat_completions(
             "fallback_used": analysis_info.get("fallback_from"),
             "status": "ok",
             **req_meta,
-        })
+        }
+
+        if settings.LOG_RAW:
+            log_entry["raw_messages"] = [
+                {"role": m.role, "content": m.text_content()} for m in request.messages
+            ]
+            log_entry["raw_response"] = response_data.get("content", "")
+
+        _log_request(log_entry)
 
         # ------------------------------------------------------------------
         # Streaming response (SSE) — for OpenClaw / streaming clients

@@ -31,9 +31,12 @@ That's it. NadirClaw starts on `http://localhost:8856` with sensible defaults (G
 - **Rate limit fallback** — if the primary model is rate-limited (429), automatically falls back to the other tier's model instead of failing
 - **Streaming support** — full SSE streaming compatible with OpenClaw, Codex, and other streaming clients
 - **Native Gemini support** — calls Gemini models directly via the Google GenAI SDK (not through LiteLLM)
-- **OpenAI OAuth login** — use your ChatGPT subscription with `nadirclaw auth openai login`, no API key needed
+- **OAuth login** — use your subscription with `nadirclaw auth <provider> login` (OpenAI, Anthropic, Google), no API key needed
 - **Multi-provider** — supports Gemini, OpenAI, Anthropic, Ollama, and any LiteLLM-supported provider
 - **OpenAI-compatible API** — drop-in replacement for any tool that speaks the OpenAI chat completions API
+- **Request reporting** — `nadirclaw report` analyzes your JSONL logs with filters, latency stats, tier breakdown, and token usage
+- **Raw logging** — optional `--log-raw` flag to capture full request/response content for debugging and replay
+- **OpenTelemetry tracing** — optional distributed tracing with GenAI semantic conventions (`pip install nadirclaw[telemetry]`)
 
 ## Prerequisites
 
@@ -44,7 +47,7 @@ That's it. NadirClaw starts on `http://localhost:8856` with sensible defaults (G
   - [Ollama](https://ollama.com) running locally (free, no API key needed)
   - [Anthropic API key](https://console.anthropic.com/) for Claude models
   - [OpenAI API key](https://platform.openai.com/) for GPT models
-  - OpenAI subscription via OAuth (`nadirclaw auth openai login`)
+  - Provider subscriptions via OAuth (`nadirclaw auth openai login`, `nadirclaw auth anthropic login`, `nadirclaw auth antigravity login`, `nadirclaw auth gemini login`)
   - Or any provider supported by [LiteLLM](https://docs.litellm.ai/docs/providers)
 
 ## Install
@@ -119,7 +122,16 @@ nadirclaw auth add --provider openai --key sk-...
 # Login with your OpenAI/ChatGPT subscription (OAuth, no API key needed)
 nadirclaw auth openai login
 
-# Store a Claude subscription token (from 'claude setup-token')
+# Login with your Anthropic/Claude subscription (OAuth, no API key needed)
+nadirclaw auth anthropic login
+
+# Login with Google Gemini (OAuth, opens browser)
+nadirclaw auth gemini login
+
+# Login with Google Antigravity (OAuth, opens browser)
+nadirclaw auth antigravity login
+
+# Store a Claude subscription token (from 'claude setup-token') - alternative to OAuth
 nadirclaw auth setup-token
 
 # Check what's configured
@@ -350,15 +362,24 @@ print(response.choices[0].message.content)
 
 ```bash
 nadirclaw serve              # Start the router server
+nadirclaw serve --log-raw    # Start with full request/response logging
 nadirclaw classify           # Classify a prompt (no server needed)
+nadirclaw report             # Show a summary report of request logs
+nadirclaw report --since 24h # Report for the last 24 hours
 nadirclaw status             # Show config, credentials, and server status
 nadirclaw auth add           # Add an API key for any provider
 nadirclaw auth status        # Show configured credentials (masked)
 nadirclaw auth remove        # Remove a stored credential
-nadirclaw auth setup-token   # Store a Claude subscription token
-nadirclaw auth openai login  # Login with OpenAI subscription (OAuth)
-nadirclaw auth openai logout # Remove stored OpenAI OAuth credential
-nadirclaw codex onboard      # Configure Codex integration
+nadirclaw auth setup-token      # Store a Claude subscription token (alternative to OAuth)
+nadirclaw auth openai login     # Login with OpenAI subscription (OAuth)
+nadirclaw auth openai logout    # Remove stored OpenAI OAuth credential
+nadirclaw auth anthropic login     # Login with Anthropic/Claude subscription (OAuth)
+nadirclaw auth anthropic logout    # Remove stored Anthropic OAuth credential
+nadirclaw auth antigravity login   # Login with Google Antigravity (OAuth, opens browser)
+nadirclaw auth antigravity logout  # Remove stored Antigravity OAuth credential
+nadirclaw auth gemini login       # Login with Google Gemini (OAuth, opens browser)
+nadirclaw auth gemini logout      # Remove stored Gemini OAuth credential
+nadirclaw codex onboard         # Configure Codex integration
 nadirclaw openclaw onboard   # Configure OpenClaw integration
 nadirclaw build-centroids    # Regenerate centroid vectors from prototypes
 ```
@@ -375,6 +396,65 @@ Options:
   --models TEXT           Comma-separated model list (legacy)
   --token TEXT            Auth token
   --verbose               Enable debug logging
+  --log-raw               Log full raw requests and responses to JSONL
+```
+
+### `nadirclaw report`
+
+Analyze request logs and print a summary report:
+
+```bash
+nadirclaw report                     # full report
+nadirclaw report --since 24h         # last 24 hours
+nadirclaw report --since 7d          # last 7 days
+nadirclaw report --since 2025-02-01  # since a specific date
+nadirclaw report --model gemini      # filter by model name
+nadirclaw report --format json       # machine-readable JSON output
+nadirclaw report --export report.txt # save to file
+```
+
+Example output:
+
+```
+NadirClaw Report
+==================================================
+Total requests: 147
+From: 2026-02-14T08:12:03+00:00
+To:   2026-02-14T22:47:19+00:00
+
+Requests by Type
+------------------------------
+  classify                    12
+  completion                 135
+
+Tier Distribution
+------------------------------
+  complex                    41  (31.1%)
+  direct                      8  (6.1%)
+  simple                     83  (62.9%)
+
+Model Usage
+------------------------------------------------------------
+  Model                               Reqs      Tokens
+  gemini-3-flash-preview                83       48210
+  openai-codex/gpt-5.3-codex           41      127840
+  claude-sonnet-4-20250514               8       31500
+
+Latency (ms)
+----------------------------------------
+  classifier       avg=12  p50=11  p95=24
+  total             avg=847  p50=620  p95=2340
+
+Token Usage
+------------------------------
+  Prompt:         138420
+  Completion:      69130
+  Total:          207550
+
+  Fallbacks: 3
+  Errors: 2
+  Streaming requests: 47
+  Requests with tools: 18 (54 tools total)
 ```
 
 ### `nadirclaw classify`
@@ -457,19 +537,43 @@ Auth is disabled by default (local-only). Set `NADIRCLAW_AUTH_TOKEN` to require 
 | `NADIRCLAW_CONFIDENCE_THRESHOLD` | `0.06` | Classification threshold (lower = more complex) |
 | `NADIRCLAW_PORT` | `8856` | Server port |
 | `NADIRCLAW_LOG_DIR` | `~/.nadirclaw/logs` | Log directory |
+| `NADIRCLAW_LOG_RAW` | `false` | Log full raw requests and responses (`true`/`false`) |
 | `NADIRCLAW_MODELS` | `openai-codex/gpt-5.3-codex,gemini-3-flash-preview` | Legacy model list (fallback if tier vars not set) |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | *(empty — disabled)* | OpenTelemetry collector endpoint (enables tracing) |
+
+## OpenTelemetry (Optional)
+
+NadirClaw supports optional distributed tracing via OpenTelemetry. Install the extras and set an OTLP endpoint:
+
+```bash
+pip install nadirclaw[telemetry]
+
+# Export to a local collector (e.g. Jaeger, Grafana Tempo)
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317 nadirclaw serve
+```
+
+When enabled, NadirClaw emits spans for:
+- **`smart_route_analysis`** — classifier decision with tier and selected model
+- **`dispatch_model`** — individual LLM provider call
+- **`chat_completion`** — full request lifecycle
+
+Spans include [GenAI semantic conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/) (`gen_ai.request.model`, `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`) plus custom `nadirclaw.*` attributes for routing metadata.
+
+If the telemetry packages are not installed or `OTEL_EXPORTER_OTLP_ENDPOINT` is not set, all tracing is a no-op with zero overhead.
 
 ## Project Structure
 
 ```
 nadirclaw/
   __init__.py        # Package version
-  cli.py             # CLI commands (serve, classify, status, auth, codex, openclaw)
+  cli.py             # CLI commands (serve, classify, report, status, auth, codex, openclaw)
   server.py          # FastAPI server with OpenAI-compatible API + streaming
   classifier.py      # Binary complexity classifier (sentence embeddings)
   credentials.py     # Credential storage, resolution chain, and OAuth token refresh
   encoder.py         # Shared SentenceTransformer singleton
-  oauth.py           # OpenAI OAuth login (delegates to Codex/OpenClaw CLI)
+  oauth.py           # OAuth login flows (OpenAI, Anthropic, Gemini, Antigravity)
+  report.py          # Log parsing and report generation
+  telemetry.py       # Optional OpenTelemetry integration (no-op without packages)
   auth.py            # Bearer token / API key authentication
   settings.py        # Environment-based configuration (reads ~/.nadirclaw/.env)
   prototypes.py      # Seed prompts for centroid generation
