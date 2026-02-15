@@ -86,6 +86,16 @@ class Settings:
         return Path.home() / ".nadirclaw" / "credentials.json"
 
     @property
+    def REASONING_MODEL(self) -> str:
+        """Model for reasoning tasks. Falls back to COMPLEX_MODEL."""
+        return os.getenv("NADIRCLAW_REASONING_MODEL", "") or self.COMPLEX_MODEL
+
+    @property
+    def FREE_MODEL(self) -> str:
+        """Free fallback model. Falls back to SIMPLE_MODEL."""
+        return os.getenv("NADIRCLAW_FREE_MODEL", "") or self.SIMPLE_MODEL
+
+    @property
     def has_explicit_tiers(self) -> bool:
         """True if SIMPLE_MODEL and COMPLEX_MODEL are explicitly set via env."""
         return bool(

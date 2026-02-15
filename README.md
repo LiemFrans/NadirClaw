@@ -7,8 +7,10 @@ Open-source LLM router that saves you money. Simple prompts go to cheap/local mo
 NadirClaw sits between your AI tool and your LLM providers as an OpenAI-compatible proxy. It classifies every prompt in ~10ms and routes it to the right model. Works with any tool that speaks the OpenAI API: [OpenClaw](https://openclaw.dev), [Codex](https://github.com/openai/codex), Claude Code, Continue, Cursor, or plain `curl`.
 
 ```
-Your AI Tool ──> NadirClaw (:8856/v1) ──> simple prompts  ──> Gemini Flash / Ollama (free/cheap)
-                                      ──> complex prompts ──> Gemini Pro / GPT / Claude (premium)
+Your AI Tool ──> NadirClaw (:8856/v1) ──> simple prompts    ──> Gemini Flash / Ollama (free/cheap)
+                                      ──> complex prompts   ──> GPT / Claude / Gemini Pro (premium)
+                                      ──> reasoning tasks   ──> o3 / DeepSeek-R1 (reasoning)
+                                      ──> agentic requests  ──> complex model (auto-detected)
 ```
 
 ## Quick Start
@@ -28,6 +30,12 @@ That's it. NadirClaw starts on `http://localhost:8856` with sensible defaults (G
 ## Features
 
 - **Smart routing** — classifies prompts in ~10ms using sentence embeddings
+- **Agentic task detection** — auto-detects tool use, multi-step loops, and agent system prompts; forces complex model for agentic requests
+- **Reasoning detection** — identifies prompts needing chain-of-thought and routes to reasoning-optimized models
+- **Routing profiles** — `auto`, `eco`, `premium`, `free`, `reasoning` — choose your cost/quality strategy per request
+- **Model aliases** — use short names like `sonnet`, `flash`, `gpt4` instead of full model IDs
+- **Session persistence** — pins the model for multi-turn conversations so you don't bounce between models mid-thread
+- **Context-window filtering** — auto-swaps to a model with a larger context window when your conversation is too long
 - **Rate limit fallback** — if the primary model is rate-limited (429), automatically falls back to the other tier's model instead of failing
 - **Streaming support** — full SSE streaming compatible with OpenClaw, Codex, and other streaming clients
 - **Native Gemini support** — calls Gemini models directly via the Google GenAI SDK (not through LiteLLM)
@@ -153,11 +161,13 @@ OPENAI_API_KEY=sk-...
 
 ### Model Configuration
 
-The two key settings are which model handles each tier:
+Configure which model handles each tier:
 
 ```bash
 NADIRCLAW_SIMPLE_MODEL=gemini-3-flash-preview          # cheap/free model
 NADIRCLAW_COMPLEX_MODEL=gemini-2.5-pro                 # premium model
+NADIRCLAW_REASONING_MODEL=o3                           # reasoning tasks (optional, defaults to complex)
+NADIRCLAW_FREE_MODEL=ollama/llama3.1:8b                # free fallback (optional, defaults to simple)
 ```
 
 ### Example Setups
@@ -358,6 +368,85 @@ response = client.chat.completions.create(
 print(response.choices[0].message.content)
 ```
 
+## Routing Profiles
+
+Choose your routing strategy by setting the model field:
+
+| Profile | Model Field | Strategy | Use Case |
+|---|---|---|---|
+| **auto** | `auto` or omit | Smart routing (default) | Best overall balance |
+| **eco** | `eco` | Always use simple model | Maximum savings |
+| **premium** | `premium` | Always use complex model | Best quality |
+| **free** | `free` | Use free fallback model | Zero cost |
+| **reasoning** | `reasoning` | Use reasoning model | Chain-of-thought tasks |
+
+```bash
+# Use profiles via the model field
+curl http://localhost:8856/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model": "eco", "messages": [{"role": "user", "content": "Hello"}]}'
+
+# Also works with nadirclaw/ prefix
+# model: "nadirclaw/eco", "nadirclaw/premium", etc.
+```
+
+## Model Aliases
+
+Use short names instead of full model IDs:
+
+| Alias | Resolves To |
+|---|---|
+| `sonnet` | `claude-sonnet-4-20250514` |
+| `opus` | `claude-opus-4-20250514` |
+| `haiku` | `claude-haiku-4-20250514` |
+| `gpt4` | `gpt-4o` |
+| `flash` | `gemini-3-flash-preview` |
+| `gemini-pro` | `gemini-2.5-pro` |
+| `deepseek` | `deepseek/deepseek-chat` |
+| `deepseek-r1` | `deepseek/deepseek-reasoner` |
+| `llama` | `ollama/llama3.1:8b` |
+
+```bash
+# Use an alias as the model
+curl http://localhost:8856/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model": "sonnet", "messages": [{"role": "user", "content": "Hello"}]}'
+```
+
+## Routing Intelligence
+
+Beyond basic simple/complex classification, NadirClaw applies routing modifiers that can override the base decision:
+
+### Agentic Task Detection
+
+NadirClaw detects agentic requests (coding agents, multi-step tool use) and forces them to the complex model, even if the individual message looks simple. Signals:
+
+- Tool definitions in the request (`tools` array)
+- Tool-role messages (active tool execution loop)
+- Assistant→tool→assistant cycles (multi-step execution)
+- Agent-like system prompts ("you are a coding agent", "you can execute commands")
+- Long system prompts (>500 chars, typical of agent instructions)
+- Deep conversations (>10 messages)
+
+This prevents a message like "now add tests" from being routed to the cheap model when it's part of an ongoing agentic refactoring session.
+
+### Reasoning Detection
+
+Prompts with 2+ reasoning markers are routed to the reasoning model (or complex model if no reasoning model is configured):
+
+- "step by step", "think through", "chain of thought"
+- "prove that", "derive the", "mathematically show"
+- "analyze the tradeoffs", "compare and contrast"
+- "critically analyze", "evaluate whether"
+
+### Session Persistence
+
+Once a conversation is routed to a model, subsequent messages in the same session reuse that model. This prevents jarring mid-conversation model switches. Sessions are keyed by system prompt + first user message, with a 30-minute TTL.
+
+### Context Window Filtering
+
+If the estimated token count of a request exceeds a model's context window, NadirClaw automatically swaps to a model with a larger context. For example, a 150k-token conversation targeting `gpt-4o` (128k context) will be redirected to `gemini-2.5-pro` (1M context).
+
 ## CLI Reference
 
 ```bash
@@ -502,11 +591,17 @@ NadirClaw uses a binary complexity classifier based on sentence embeddings:
 
 3. **Borderline handling**: When confidence is below the threshold (default 0.06), the classifier defaults to complex -- it's cheaper to over-serve a simple prompt than to under-serve a complex one.
 
-4. **Routing**: Calls the selected model via the appropriate backend:
+4. **Routing modifiers**: After classification, NadirClaw applies intelligent overrides:
+   - **Agentic detection** — if tool definitions, tool-role messages, or agent system prompts are detected, forces the complex model
+   - **Reasoning detection** — if 2+ reasoning markers are found, routes to the reasoning model
+   - **Context window check** — if the conversation exceeds the model's context window, swaps to a model that fits
+   - **Session persistence** — reuses the same model for follow-up messages in the same conversation
+
+5. **Dispatch**: Calls the selected model via the appropriate backend:
    - **Gemini models** — called natively via the [Google GenAI SDK](https://github.com/googleapis/python-genai) for best performance
    - **All other models** — called via [LiteLLM](https://docs.litellm.ai), which provides a unified interface to 100+ providers
 
-5. **Rate limit fallback**: If the selected model returns a 429 rate limit error, NadirClaw retries once, then automatically falls back to the other tier's model. If both are rate-limited, it returns a user-friendly error message.
+6. **Rate limit fallback**: If the selected model returns a 429 rate limit error, NadirClaw retries once, then automatically falls back to the other tier's model. If both are rate-limited, it returns a user-friendly error message.
 
 Classification takes ~10ms on a warm encoder. The first request takes ~2-3 seconds to load the embedding model.
 
@@ -529,6 +624,8 @@ Auth is disabled by default (local-only). Set `NADIRCLAW_AUTH_TOKEN` to require 
 |---|---|---|
 | `NADIRCLAW_SIMPLE_MODEL` | `gemini-3-flash-preview` | Model for simple prompts |
 | `NADIRCLAW_COMPLEX_MODEL` | `openai-codex/gpt-5.3-codex` | Model for complex prompts |
+| `NADIRCLAW_REASONING_MODEL` | *(falls back to complex)* | Model for reasoning tasks |
+| `NADIRCLAW_FREE_MODEL` | *(falls back to simple)* | Free fallback model |
 | `NADIRCLAW_AUTH_TOKEN` | *(empty — auth disabled)* | Set to require a bearer token |
 | `GEMINI_API_KEY` | -- | Google Gemini API key (also accepts `GOOGLE_API_KEY`) |
 | `ANTHROPIC_API_KEY` | -- | Anthropic API key |
@@ -572,6 +669,7 @@ nadirclaw/
   credentials.py     # Credential storage, resolution chain, and OAuth token refresh
   encoder.py         # Shared SentenceTransformer singleton
   oauth.py           # OAuth login flows (OpenAI, Anthropic, Gemini, Antigravity)
+  routing.py         # Routing intelligence (agentic, reasoning, profiles, aliases, sessions)
   report.py          # Log parsing and report generation
   telemetry.py       # Optional OpenTelemetry integration (no-op without packages)
   auth.py            # Bearer token / API key authentication

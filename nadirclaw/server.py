@@ -163,11 +163,14 @@ def _extract_request_metadata(request: ChatCompletionRequest) -> Dict[str, Any]:
     tool_msgs = [m for m in messages if m.role == "tool"]
     tool_count = len(tool_defs) + len(tool_msgs)
 
+    system_text = " ".join(m.text_content() for m in system_msgs) if has_system else ""
+
     return {
         "stream": bool(request.stream),
         "message_count": len(messages),
         "has_system_prompt": has_system,
         "system_prompt_length": system_len,
+        "system_prompt_text": system_text,
         "has_tools": tool_count > 0,
         "tool_count": tool_count,
         "requested_model": request.model,
@@ -724,20 +727,112 @@ async def chat_completions(
         # Extract request metadata for enhanced logging
         req_meta = _extract_request_metadata(request)
 
-        # Route
-        if request.model and request.model != "auto":
-            selected_model = request.model
+        from nadirclaw.routing import (
+            apply_routing_modifiers,
+            get_session_cache,
+            resolve_alias,
+            resolve_profile,
+        )
+
+        # --- Check routing profiles (auto/eco/premium/free/reasoning) ---
+        profile = resolve_profile(request.model)
+
+        if profile == "eco":
+            selected_model = settings.SIMPLE_MODEL
             analysis_info = {
-                "strategy": "direct",
+                "strategy": "profile:eco",
                 "selected_model": selected_model,
-                "tier": "direct",
+                "tier": "simple",
                 "confidence": 1.0,
                 "complexity_score": 0,
             }
+        elif profile == "premium":
+            selected_model = settings.COMPLEX_MODEL
+            analysis_info = {
+                "strategy": "profile:premium",
+                "selected_model": selected_model,
+                "tier": "complex",
+                "confidence": 1.0,
+                "complexity_score": 0,
+            }
+        elif profile == "free":
+            selected_model = settings.FREE_MODEL
+            analysis_info = {
+                "strategy": "profile:free",
+                "selected_model": selected_model,
+                "tier": "free",
+                "confidence": 1.0,
+                "complexity_score": 0,
+            }
+        elif profile == "reasoning":
+            selected_model = settings.REASONING_MODEL
+            analysis_info = {
+                "strategy": "profile:reasoning",
+                "selected_model": selected_model,
+                "tier": "reasoning",
+                "confidence": 1.0,
+                "complexity_score": 0,
+            }
+        elif request.model and request.model != "auto" and profile is None:
+            # --- Check model aliases ---
+            resolved = resolve_alias(request.model)
+            if resolved:
+                selected_model = resolved
+                analysis_info = {
+                    "strategy": "alias",
+                    "selected_model": selected_model,
+                    "alias_from": request.model,
+                    "tier": "direct",
+                    "confidence": 1.0,
+                    "complexity_score": 0,
+                }
+            else:
+                selected_model = request.model
+                analysis_info = {
+                    "strategy": "direct",
+                    "selected_model": selected_model,
+                    "tier": "direct",
+                    "confidence": 1.0,
+                    "complexity_score": 0,
+                }
         else:
-            selected_model, analysis_info = await _smart_route_full(
-                request.messages, current_user
-            )
+            # --- Smart routing (auto or no model specified) ---
+            # Check session cache first
+            session_cache = get_session_cache()
+            cached = session_cache.get(request.messages)
+            if cached:
+                cached_model, cached_tier = cached
+                selected_model = cached_model
+                analysis_info = {
+                    "strategy": "session-cache",
+                    "selected_model": selected_model,
+                    "tier": cached_tier,
+                    "confidence": 1.0,
+                    "complexity_score": 0,
+                }
+                logger.debug("Session cache hit: model=%s tier=%s", cached_model, cached_tier)
+            else:
+                selected_model, analysis_info = await _smart_route_full(
+                    request.messages, current_user
+                )
+
+                # Apply routing modifiers (agentic, reasoning, context window)
+                selected_model, final_tier, routing_info = apply_routing_modifiers(
+                    base_model=selected_model,
+                    base_tier=analysis_info.get("tier", "simple"),
+                    request_meta=req_meta,
+                    messages=request.messages,
+                    simple_model=settings.SIMPLE_MODEL,
+                    complex_model=settings.COMPLEX_MODEL,
+                    reasoning_model=settings.REASONING_MODEL,
+                    free_model=settings.FREE_MODEL,
+                )
+                analysis_info["tier"] = final_tier
+                analysis_info["selected_model"] = selected_model
+                analysis_info["routing_modifiers"] = routing_info
+
+                # Cache this decision for session persistence
+                session_cache.put(request.messages, selected_model, final_tier)
 
         # Resolve provider credential
         from nadirclaw.credentials import detect_provider, get_credential
