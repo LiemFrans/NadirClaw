@@ -54,10 +54,25 @@ fi
 # ── Install ──────────────────────────────────────────────────
 
 # Clone or update
-if [ -d "$INSTALL_DIR" ]; then
+if [ -d "$INSTALL_DIR/.git" ]; then
     info "Updating existing installation at $INSTALL_DIR..."
     cd "$INSTALL_DIR"
     git pull --quiet origin main 2>/dev/null || git pull --quiet
+elif [ -d "$INSTALL_DIR" ]; then
+    # Directory exists but is not a git repo (e.g. created by credentials/logs).
+    # Preserve user data, clone into a temp dir, then merge.
+    info "Found $INSTALL_DIR (not a git repo). Installing into it..."
+    TMPDIR_CLONE="$(mktemp -d)"
+    git clone --quiet --depth 1 "$REPO" "$TMPDIR_CLONE"
+    # Move git history and source files in, but don't overwrite user data
+    cp -rn "$TMPDIR_CLONE/." "$INSTALL_DIR/" 2>/dev/null || true
+    # Ensure .git and source files are present
+    cp -r "$TMPDIR_CLONE/.git" "$INSTALL_DIR/.git"
+    cp -r "$TMPDIR_CLONE/nadirclaw" "$INSTALL_DIR/nadirclaw"
+    cp "$TMPDIR_CLONE/pyproject.toml" "$INSTALL_DIR/pyproject.toml"
+    cp "$TMPDIR_CLONE/install.sh" "$INSTALL_DIR/install.sh" 2>/dev/null || true
+    rm -rf "$TMPDIR_CLONE"
+    cd "$INSTALL_DIR"
 else
     info "Cloning NadirClaw to $INSTALL_DIR..."
     git clone --quiet --depth 1 "$REPO" "$INSTALL_DIR"
