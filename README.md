@@ -1,6 +1,11 @@
 # NadirClaw
 <img alt="NadirClaw" src="logo_rb.png" />
 
+[![PyPI](https://img.shields.io/pypi/v/nadirclaw)](https://pypi.org/project/nadirclaw/)
+[![CI](https://github.com/doramirdor/NadirClaw/actions/workflows/ci.yml/badge.svg)](https://github.com/doramirdor/NadirClaw/actions)
+[![Python](https://img.shields.io/pypi/pyversions/nadirclaw)](https://pypi.org/project/nadirclaw/)
+[![License](https://img.shields.io/github/license/doramirdor/NadirClaw)](LICENSE)
+[![GitHub stars](https://img.shields.io/github/stars/doramirdor/NadirClaw?style=social)](https://github.com/doramirdor/NadirClaw)
 
 Open-source LLM router that saves you money. Simple prompts go to cheap/local models, complex prompts go to premium models -- automatically.
 
@@ -14,6 +19,12 @@ Your AI Tool ──> NadirClaw (:8856/v1) ──> simple prompts    ──> Gemi
 ```
 
 ## Quick Start
+
+```bash
+pip install nadirclaw
+```
+
+Or install from source:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/doramirdor/NadirClaw/main/install.sh | sh
