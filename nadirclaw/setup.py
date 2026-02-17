@@ -6,6 +6,7 @@ configuration on first run or via `nadirclaw setup`.
 
 import json
 import os
+import re
 import shutil
 import urllib.error
 import urllib.request
@@ -259,10 +260,70 @@ def _fetch_ollama_models() -> List[str]:
     return sorted(models)
 
 
+_DATE_SUFFIX_RE = re.compile(r"-\d{4}-?\d{2}-?\d{2}$")
+
+
+def _filter_top_models(provider: str, models: List[str]) -> List[str]:
+    """Keep only current-generation top models per provider."""
+    if provider == "anthropic":
+        return _filter_anthropic_top(models)
+    if provider == "openai":
+        return _filter_openai_top(models)
+    if provider == "google":
+        return _filter_google_top(models)
+    return models  # deepseek, ollama: show all
+
+
+def _filter_anthropic_top(models: List[str]) -> List[str]:
+    """Keep only the latest version of each Claude family (opus/sonnet/haiku)."""
+    families: Dict[str, List[tuple]] = {}  # family -> [(model_id, date)]
+    for m in models:
+        family = None
+        for name in ("opus", "sonnet", "haiku"):
+            if name in m:
+                family = name
+                break
+        if not family:
+            continue
+        # Extract date suffix (YYYYMMDD)
+        parts = m.split("-")
+        date = parts[-1] if parts[-1].isdigit() and len(parts[-1]) == 8 else "0"
+        families.setdefault(family, []).append((m, date))
+
+    top = []
+    for variants in families.values():
+        variants.sort(key=lambda x: x[1], reverse=True)
+        top.append(variants[0][0])  # latest version
+    return sorted(top)
+
+
+def _filter_openai_top(models: List[str]) -> List[str]:
+    """Remove dated variants and old-generation OpenAI models."""
+    old_gen = ("gpt-3.5", "gpt-4-", "gpt-4o", "chatgpt-4o", "ft:")
+    top = []
+    for m in models:
+        if _DATE_SUFFIX_RE.search(m):
+            continue
+        if any(m.startswith(p) for p in old_gen):
+            continue
+        top.append(m)
+    return sorted(top)
+
+
+def _filter_google_top(models: List[str]) -> List[str]:
+    """Keep only current-generation Gemini models (2.5+)."""
+    current_gen = ("gemini-2.5-", "gemini-3-")
+    top = []
+    for m in models:
+        if any(m.startswith(p) for p in current_gen):
+            top.append(m)
+    return sorted(top)
+
+
 def fetch_provider_models(provider: str, credential: str) -> List[str]:
     """Fetch available model IDs from a provider's API.
 
-    Returns a list of model ID strings, or empty list on failure.
+    Returns only top current-generation models, or empty list on failure.
     """
     fetchers = {
         "openai": _fetch_openai_models,
@@ -274,7 +335,8 @@ def fetch_provider_models(provider: str, credential: str) -> List[str]:
         return _fetch_ollama_models()
     fetcher = fetchers.get(provider)
     if fetcher and credential:
-        return fetcher(credential)
+        raw = fetcher(credential)
+        return _filter_top_models(provider, raw)
     return []
 
 

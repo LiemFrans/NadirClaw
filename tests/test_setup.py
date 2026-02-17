@@ -11,6 +11,10 @@ from click.testing import CliRunner
 
 from nadirclaw.setup import (
     ENV_FILE,
+    _filter_anthropic_top,
+    _filter_google_top,
+    _filter_openai_top,
+    _filter_top_models,
     classify_model_tier,
     detect_existing_config,
     fetch_provider_models,
@@ -106,6 +110,66 @@ class TestClassifyModelTier:
 
     def test_gemini_pro_is_complex(self):
         assert classify_model_tier("gemini-2.5-pro") == "complex"
+
+
+# ---------------------------------------------------------------------------
+# filter_top_models
+# ---------------------------------------------------------------------------
+
+class TestFilterTopModels:
+    def test_anthropic_keeps_latest_per_family(self):
+        models = [
+            "claude-3-opus-20240229",
+            "claude-opus-4-20250514",
+            "claude-opus-4-6-20250918",
+            "claude-3-5-sonnet-20241022",
+            "claude-sonnet-4-20250514",
+            "claude-sonnet-4-5-20250929",
+            "claude-3-5-haiku-20241022",
+            "claude-haiku-4-20250514",
+            "claude-haiku-4-5-20251001",
+        ]
+        result = _filter_anthropic_top(models)
+        assert result == [
+            "claude-haiku-4-5-20251001",
+            "claude-opus-4-6-20250918",
+            "claude-sonnet-4-5-20250929",
+        ]
+
+    def test_openai_removes_dated_and_old_gen(self):
+        models = [
+            "gpt-3.5-turbo", "gpt-4-turbo", "gpt-4o",
+            "gpt-4.1", "gpt-4.1-2025-04-14",
+            "gpt-4.1-mini", "gpt-4.1-mini-2025-04-14",
+            "o3", "o3-2025-04-16", "o4-mini",
+        ]
+        result = _filter_openai_top(models)
+        assert "gpt-4.1" in result
+        assert "gpt-4.1-mini" in result
+        assert "o3" in result
+        assert "o4-mini" in result
+        assert "gpt-3.5-turbo" not in result
+        assert "gpt-4o" not in result
+        assert "gpt-4.1-2025-04-14" not in result
+        assert "o3-2025-04-16" not in result
+
+    def test_google_keeps_current_gen(self):
+        models = [
+            "gemini-1.5-flash", "gemini-1.5-pro",
+            "gemini-2.5-flash", "gemini-2.5-pro",
+        ]
+        result = _filter_google_top(models)
+        assert result == ["gemini-2.5-flash", "gemini-2.5-pro"]
+
+    def test_ollama_no_filter(self):
+        models = ["ollama/llama3.1:8b", "ollama/qwen3:32b"]
+        result = _filter_top_models("ollama", models)
+        assert result == models
+
+    def test_deepseek_no_filter(self):
+        models = ["deepseek/deepseek-chat", "deepseek/deepseek-reasoner"]
+        result = _filter_top_models("deepseek", models)
+        assert result == models
 
 
 # ---------------------------------------------------------------------------
@@ -208,16 +272,22 @@ class TestSelectDefaultModel:
 
 class TestFetchProviderModels:
     def test_openai_fetch(self, monkeypatch):
-        """Should parse OpenAI /v1/models response."""
+        """Should return only top models, filtering dated variants and old gen."""
         mock_response = json.dumps({
             "data": [
                 {"id": "gpt-4.1"},
+                {"id": "gpt-4.1-2025-04-14"},  # dated variant, filtered
                 {"id": "gpt-4.1-mini"},
+                {"id": "gpt-4.1-mini-2025-04-14"},  # dated variant, filtered
                 {"id": "gpt-5-mini"},
-                {"id": "dall-e-3"},  # should be filtered
-                {"id": "text-embedding-3-large"},  # should be filtered
+                {"id": "gpt-4o"},  # old gen, filtered
+                {"id": "gpt-4o-2024-11-20"},  # old gen + dated, filtered
+                {"id": "gpt-3.5-turbo"},  # old gen, filtered
+                {"id": "dall-e-3"},  # not chat, filtered
+                {"id": "text-embedding-3-large"},  # not chat, filtered
                 {"id": "o3"},
-                {"id": "tts-1"},  # should be filtered
+                {"id": "o3-2025-04-16"},  # dated variant, filtered
+                {"id": "tts-1"},  # not chat, filtered
             ]
         }).encode()
 
@@ -231,17 +301,27 @@ class TestFetchProviderModels:
         models = fetch_provider_models("openai", "sk-test")
         assert "gpt-4.1" in models
         assert "gpt-4.1-mini" in models
+        assert "gpt-5-mini" in models
         assert "o3" in models
+        # Filtered out:
+        assert "gpt-4.1-2025-04-14" not in models
+        assert "gpt-4o" not in models
+        assert "gpt-3.5-turbo" not in models
         assert "dall-e-3" not in models
-        assert "tts-1" not in models
 
     def test_anthropic_fetch(self, monkeypatch):
-        """Should parse Anthropic /v1/models response with pagination."""
+        """Should return only latest version of each Claude family."""
         mock_response = json.dumps({
             "data": [
                 {"id": "claude-opus-4-6-20250918"},
+                {"id": "claude-opus-4-20250514"},  # older, filtered
+                {"id": "claude-3-opus-20240229"},  # old gen, filtered
                 {"id": "claude-sonnet-4-5-20250929"},
+                {"id": "claude-sonnet-4-20250514"},  # older, filtered
+                {"id": "claude-3-5-sonnet-20241022"},  # old gen, filtered
                 {"id": "claude-haiku-4-5-20251001"},
+                {"id": "claude-haiku-4-20250514"},  # older, filtered
+                {"id": "claude-3-5-haiku-20241022"},  # old gen, filtered
             ],
             "has_more": False,
         }).encode()
@@ -254,15 +334,24 @@ class TestFetchProviderModels:
         monkeypatch.setattr("urllib.request.urlopen", lambda *a, **k: mock_resp)
 
         models = fetch_provider_models("anthropic", "sk-ant-test")
+        # Only the latest of each family
         assert "claude-opus-4-6-20250918" in models
         assert "claude-sonnet-4-5-20250929" in models
+        assert "claude-haiku-4-5-20251001" in models
+        assert len(models) == 3
+        # Old versions filtered
+        assert "claude-opus-4-20250514" not in models
+        assert "claude-3-opus-20240229" not in models
+        assert "claude-3-5-sonnet-20241022" not in models
 
     def test_google_fetch(self, monkeypatch):
-        """Should parse Google GenAI models response."""
+        """Should return only current-gen Gemini models."""
         mock_response = json.dumps({
             "models": [
                 {"name": "models/gemini-2.5-flash", "supportedGenerationMethods": ["generateContent"]},
                 {"name": "models/gemini-2.5-pro", "supportedGenerationMethods": ["generateContent"]},
+                {"name": "models/gemini-1.5-flash", "supportedGenerationMethods": ["generateContent"]},  # old gen
+                {"name": "models/gemini-1.5-pro", "supportedGenerationMethods": ["generateContent"]},  # old gen
                 {"name": "models/text-embedding-004", "supportedGenerationMethods": ["embedContent"]},
             ]
         }).encode()
@@ -277,6 +366,8 @@ class TestFetchProviderModels:
         models = fetch_provider_models("google", "AIza-test")
         assert "gemini-2.5-flash" in models
         assert "gemini-2.5-pro" in models
+        assert "gemini-1.5-flash" not in models
+        assert "gemini-1.5-pro" not in models
         assert "text-embedding-004" not in models
 
     def test_fetch_failure_returns_empty(self, monkeypatch):
