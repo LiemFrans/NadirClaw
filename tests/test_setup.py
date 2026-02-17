@@ -236,13 +236,14 @@ class TestFetchProviderModels:
         assert "tts-1" not in models
 
     def test_anthropic_fetch(self, monkeypatch):
-        """Should parse Anthropic /v1/models response."""
+        """Should parse Anthropic /v1/models response with pagination."""
         mock_response = json.dumps({
             "data": [
                 {"id": "claude-opus-4-6-20250918"},
                 {"id": "claude-sonnet-4-5-20250929"},
                 {"id": "claude-haiku-4-5-20251001"},
-            ]
+            ],
+            "has_more": False,
         }).encode()
 
         mock_resp = MagicMock()

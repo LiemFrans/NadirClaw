@@ -168,31 +168,40 @@ def _fetch_openai_models(credential: str) -> List[str]:
 
 
 def _fetch_anthropic_models(credential: str) -> List[str]:
-    """Fetch available models from the Anthropic API."""
-    req = urllib.request.Request(
-        "https://api.anthropic.com/v1/models",
-        headers={
-            "x-api-key": credential,
-            "anthropic-version": "2023-06-01",
-        },
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read())
-    except Exception:
-        return []
-
+    """Fetch all available models from the Anthropic API (handles pagination)."""
     models = []
-    for m in data.get("data", []):
-        mid = m.get("id", "")
-        if mid.startswith("claude-"):
-            models.append(mid)
+    base_url = "https://api.anthropic.com/v1/models"
+    headers = {
+        "x-api-key": credential,
+        "anthropic-version": "2023-06-01",
+    }
+    url = f"{base_url}?limit=1000"
+
+    while url:
+        req = urllib.request.Request(url, headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read())
+        except Exception:
+            break
+
+        for m in data.get("data", []):
+            mid = m.get("id", "")
+            if mid.startswith("claude-"):
+                models.append(mid)
+
+        # Follow pagination if there are more results
+        if data.get("has_more") and data.get("last_id"):
+            url = f"{base_url}?limit=1000&after_id={data['last_id']}"
+        else:
+            url = None
+
     return sorted(models)
 
 
 def _fetch_google_models(credential: str) -> List[str]:
     """Fetch available Gemini models from the Google GenAI API."""
-    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={credential}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={credential}&pageSize=1000"
     req = urllib.request.Request(url)
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
