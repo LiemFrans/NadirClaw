@@ -11,12 +11,15 @@ Open-source LLM router that saves you money. Simple prompts go to cheap/local mo
 
 NadirClaw sits between your AI tool and your LLM providers as an OpenAI-compatible proxy. It classifies every prompt in ~10ms and routes it to the right model. Works with any tool that speaks the OpenAI API: [OpenClaw](https://openclaw.dev), [Codex](https://github.com/openai/codex), Claude Code, Continue, Cursor, or plain `curl`.
 
-```
-Your AI Tool ──> NadirClaw (:8856/v1) ──> simple prompts    ──> Gemini Flash / Ollama (free/cheap)
-                                      ──> complex prompts   ──> GPT / Claude / Gemini Pro (premium)
-                                      ──> reasoning tasks   ──> o3 / DeepSeek-R1 (reasoning)
-                                      ──> agentic requests  ──> complex model (auto-detected)
-```
+> **How does NadirClaw compare to OpenRouter?** See [NadirClaw vs OpenRouter](docs/comparison.md).
+
+<p align="center">
+  <img src="docs/images/architecture.png" alt="NadirClaw Architecture" width="700" />
+</p>
+
+<p align="center">
+  <img src="docs/images/nadirclaw_img.png" alt="NadirClaw in action" width="700" />
+</p>
 
 ## Quick Start
 
@@ -191,13 +194,13 @@ NADIRCLAW_FREE_MODEL=ollama/llama3.1:8b                # free fallback (optional
 
 | Setup | Simple Model | Complex Model | API Keys Needed |
 |---|---|---|---|
-| **Gemini + Gemini** | `gemini-3-flash-preview` | `gemini-2.5-pro` | `GEMINI_API_KEY` |
-| **Gemini + Claude** | `gemini-3-flash-preview` | `claude-sonnet-4-20250514` | `GEMINI_API_KEY` + `ANTHROPIC_API_KEY` |
-| **Claude + Ollama** | `ollama/llama3.1:8b` | `claude-sonnet-4-20250514` | `ANTHROPIC_API_KEY` |
-| **Claude + Claude** | `claude-haiku-4-20250514` | `claude-sonnet-4-20250514` | `ANTHROPIC_API_KEY` |
-| **OpenAI + Ollama** | `ollama/llama3.1:8b` | `gpt-4o` | `OPENAI_API_KEY` |
-| **OpenAI + OpenAI** | `gpt-4o-mini` | `gpt-4o` | `OPENAI_API_KEY` |
-| **OpenAI Codex** | `gemini-3-flash-preview` | `openai-codex/gpt-5.3-codex` | `GEMINI_API_KEY` + OAuth login |
+| **Gemini + Gemini** | `gemini-2.5-flash` | `gemini-2.5-pro` | `GEMINI_API_KEY` |
+| **Gemini + Claude** | `gemini-2.5-flash` | `claude-sonnet-4-5-20250929` | `GEMINI_API_KEY` + `ANTHROPIC_API_KEY` |
+| **Claude + Ollama** | `ollama/llama3.1:8b` | `claude-sonnet-4-5-20250929` | `ANTHROPIC_API_KEY` |
+| **Claude + Claude** | `claude-haiku-4-5-20251001` | `claude-sonnet-4-5-20250929` | `ANTHROPIC_API_KEY` |
+| **OpenAI + Ollama** | `ollama/llama3.1:8b` | `gpt-4.1` | `OPENAI_API_KEY` |
+| **OpenAI + OpenAI** | `gpt-4.1-mini` | `gpt-4.1` | `OPENAI_API_KEY` |
+| **OpenAI Codex** | `gemini-2.5-flash` | `openai-codex/gpt-5.3-codex` | `GEMINI_API_KEY` + OAuth login |
 | **Fully local** | `ollama/llama3.1:8b` | `ollama/qwen3:32b` | None |
 
 Gemini models are called natively via the Google GenAI SDK. All other models go through [LiteLLM](https://docs.litellm.ai/docs/providers), which supports 100+ providers.
@@ -413,11 +416,12 @@ Use short names instead of full model IDs:
 
 | Alias | Resolves To |
 |---|---|
-| `sonnet` | `claude-sonnet-4-20250514` |
-| `opus` | `claude-opus-4-20250514` |
-| `haiku` | `claude-haiku-4-20250514` |
-| `gpt4` | `gpt-4o` |
-| `flash` | `gemini-3-flash-preview` |
+| `sonnet` | `claude-sonnet-4-5-20250929` |
+| `opus` | `claude-opus-4-6-20250918` |
+| `haiku` | `claude-haiku-4-5-20251001` |
+| `gpt4` | `gpt-4.1` |
+| `gpt5` | `gpt-5.2` |
+| `flash` | `gemini-2.5-flash` |
 | `gemini-pro` | `gemini-2.5-pro` |
 | `deepseek` | `deepseek/deepseek-chat` |
 | `deepseek-r1` | `deepseek/deepseek-reasoner` |
@@ -431,6 +435,10 @@ curl http://localhost:8856/v1/chat/completions \
 ```
 
 ## Routing Intelligence
+
+<p align="center">
+  <img src="docs/images/routing-flow.png" alt="Routing flow" width="700" />
+</p>
 
 Beyond basic simple/complex classification, NadirClaw applies routing modifiers that can override the base decision:
 
@@ -507,6 +515,10 @@ Options:
 ```
 
 ### `nadirclaw report`
+
+<p align="center">
+  <img src="docs/images/report.png" alt="nadirclaw report output" width="400" />
+</p>
 
 Analyze request logs and print a summary report:
 
@@ -600,6 +612,12 @@ Server:        RUNNING (ok)
 ```
 
 ## How It Works
+
+Most LLM usage doesn't need a premium model. NadirClaw routes each prompt to the right tier automatically:
+
+<p align="center">
+  <img src="docs/images/usage-distribution.png" alt="Typical LLM usage distribution" width="500" />
+</p>
 
 NadirClaw uses a binary complexity classifier based on sentence embeddings:
 
