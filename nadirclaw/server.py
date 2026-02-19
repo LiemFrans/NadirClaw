@@ -6,11 +6,14 @@ OpenAI-compatible API at /v1/chat/completions.
 """
 
 import asyncio
+import collections
 import json
 import logging
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+from threading import Lock
 from typing import Any, Dict, List, Optional, Union
 
 from fastapi import Depends, FastAPI, HTTPException, Request
@@ -42,8 +45,6 @@ class RateLimitExhausted(Exception):
 # ---------------------------------------------------------------------------
 # Request rate limiter (in-memory, per user)
 # ---------------------------------------------------------------------------
-
-import collections
 
 _MAX_CONTENT_LENGTH = 1_000_000  # 1 MB total across all messages
 
@@ -163,6 +164,9 @@ class ClassifyBatchRequest(BaseModel):
 # Logging helper
 # ---------------------------------------------------------------------------
 
+_log_lock = Lock()
+
+
 def _log_request(entry: Dict[str, Any]) -> None:
     """Append a JSON line to the request log and print to console."""
     log_dir = settings.LOG_DIR
@@ -170,8 +174,10 @@ def _log_request(entry: Dict[str, Any]) -> None:
     request_log = log_dir / "requests.jsonl"
 
     entry["timestamp"] = datetime.now(timezone.utc).isoformat()
-    with open(request_log, "a") as f:
-        f.write(json.dumps(entry, default=str) + "\n")
+    line = json.dumps(entry, default=str) + "\n"
+    with _log_lock:
+        with open(request_log, "a") as f:
+            f.write(line)
 
     tier = entry.get("tier", "?")
     model = entry.get("selected_model", "?")
@@ -398,9 +404,6 @@ def _strip_gemini_prefix(model: str) -> str:
 
 # Shared Gemini clients — reused across requests, keyed by API key.
 # A lock ensures concurrent requests with different keys don't race.
-from concurrent.futures import ThreadPoolExecutor
-from threading import Lock
-
 _gemini_clients: Dict[str, Any] = {}
 _gemini_client_lock = Lock()
 

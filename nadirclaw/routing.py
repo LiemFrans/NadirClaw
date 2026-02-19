@@ -8,6 +8,7 @@ import hashlib
 import logging
 import re
 import time
+from threading import Lock
 from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger("nadirclaw.routing")
@@ -306,6 +307,7 @@ class SessionCache:
         self._access_order: List[str] = []  # LRU tracking (most recent at end)
         self._cleanup_counter = 0
         self._cleanup_interval = 100  # run cleanup every N puts
+        self._lock = Lock()
 
     def _make_key(self, messages: List[Any]) -> str:
         """Generate a session key from conversation shape."""
@@ -345,38 +347,43 @@ class SessionCache:
     def get(self, messages: List[Any]) -> Optional[Tuple[str, str]]:
         """Return (model, tier) if a session exists and isn't expired."""
         key = self._make_key(messages)
-        entry = self._cache.get(key)
-        if entry is None:
-            return None
-        model, tier, ts = entry
-        if time.time() - ts > self._ttl:
-            del self._cache[key]
-            try:
-                self._access_order.remove(key)
-            except ValueError:
-                pass
-            return None
-        self._touch(key)
-        return model, tier
+        with self._lock:
+            entry = self._cache.get(key)
+            if entry is None:
+                return None
+            model, tier, ts = entry
+            if time.time() - ts > self._ttl:
+                del self._cache[key]
+                try:
+                    self._access_order.remove(key)
+                except ValueError:
+                    pass
+                return None
+            self._touch(key)
+            return model, tier
 
     def put(self, messages: List[Any], model: str, tier: str) -> None:
         """Store a routing decision for this session."""
-        # Periodic cleanup of expired entries
-        self._cleanup_counter += 1
-        if self._cleanup_counter >= self._cleanup_interval:
-            self._cleanup_counter = 0
-            self.clear_expired()
-
         key = self._make_key(messages)
-        self._cache[key] = (model, tier, time.time())
-        self._touch(key)
+        with self._lock:
+            # Periodic cleanup of expired entries
+            self._cleanup_counter += 1
+            if self._cleanup_counter >= self._cleanup_interval:
+                self._cleanup_counter = 0
+                self.clear_expired()
 
-        # Evict if over capacity
-        if len(self._cache) > self._max_size:
-            self._evict_lru()
+            self._cache[key] = (model, tier, time.time())
+            self._touch(key)
+
+            # Evict if over capacity
+            if len(self._cache) > self._max_size:
+                self._evict_lru()
 
     def clear_expired(self) -> int:
-        """Remove expired entries. Returns number removed."""
+        """Remove expired entries. Returns number removed.
+
+        Caller must hold self._lock.
+        """
         now = time.time()
         expired = [k for k, (_, _, ts) in self._cache.items() if now - ts > self._ttl]
         for k in expired:
