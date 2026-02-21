@@ -117,8 +117,9 @@ def serve(port, host, simple_model, complex_model, models, token, verbose, log_r
 
     actual_port = port or settings.PORT
     actual_host = host or settings.HOST
+    display_host = "localhost" if actual_host == "0.0.0.0" else actual_host
     click.echo(f"Starting NadirClaw on {actual_host}:{actual_port}...")
-    click.echo(f"  Admin dashboard: http://{actual_host}:{actual_port}/admin")
+    click.echo(f"  Admin dashboard: http://{display_host}:{actual_port}/admin")
     click.echo(f"  Simple model:  {settings.SIMPLE_MODEL}")
     click.echo(f"  Complex model: {settings.COMPLEX_MODEL}")
     uvicorn.run(
