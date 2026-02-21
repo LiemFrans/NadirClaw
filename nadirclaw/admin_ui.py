@@ -7,6 +7,7 @@ Contains session handling and HTML rendering for:
 
 import json
 import os
+import re
 import time
 import uuid
 from html import escape
@@ -197,7 +198,7 @@ def render_admin_settings(
             return "other"
         if "/" in m:
             return m.split("/", 1)[0]
-        if m.startswith(("gpt", "o1", "o3", "o4")):
+        if m.startswith("gpt") or re.match(r"^o[1-9](?:-|$)", m):
             return "openai"
         if m.startswith("claude"):
             return "anthropic"
@@ -538,6 +539,23 @@ def render_admin_settings(
                             model: raw.slice(slash + 1).trim(),
                         }};
                     }}
+
+                    // Infer provider from common unprefixed model naming schemes.
+                    // This avoids mislabeling failover rows as the primary tier provider.
+                    const lower = raw.toLowerCase();
+                    if (lower.startsWith('gpt') || /^o[1-9](?:-|$)/.test(lower)) {{
+                        return {{ provider: 'openai', model: raw }};
+                    }}
+                    if (lower.startsWith('claude')) {{
+                        return {{ provider: 'anthropic', model: raw }};
+                    }}
+                    if (lower.startsWith('gemini')) {{
+                        return {{ provider: 'google', model: raw }};
+                    }}
+                    if (lower.startsWith('deepseek')) {{
+                        return {{ provider: 'deepseek', model: raw }};
+                    }}
+
                     return {{ provider: fallback, model: raw }};
                 }}
 
