@@ -9,20 +9,33 @@ import asyncio
 import collections
 import json
 import logging
+import os
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+from pathlib import Path
 from threading import Lock
 from typing import Any, Dict, List, Optional, Union
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
 from nadirclaw import __version__
+from nadirclaw.admin_ui import (
+    admin_session_cookie_name,
+    admin_session_ttl_seconds,
+    create_admin_session,
+    get_admin_password,
+    is_admin_authenticated,
+    parse_form_body,
+    pop_admin_session,
+    render_admin_login,
+    render_admin_settings,
+)
 from nadirclaw.auth import UserSession, validate_local_auth
 from nadirclaw.settings import settings
 
@@ -160,6 +173,44 @@ class ClassifyBatchRequest(BaseModel):
     prompts: List[str]
 
 
+class SetupWebhookRequest(BaseModel):
+    """Webhook payload for setup-related runtime configuration."""
+
+    ollama_api_base: Optional[str] = None
+    fetch_models: bool = True
+    env: Optional[Dict[str, Any]] = None
+
+
+class AdminProviderModelsRequest(BaseModel):
+    """Request payload for admin provider model discovery."""
+
+    provider: str
+    ollama_api_base: Optional[str] = None
+    credential_override: Optional[str] = None
+
+
+_SETUP_WEBHOOK_FIELD_TO_ENV = {
+    "nadirclaw_simple_model": "NADIRCLAW_SIMPLE_MODEL",
+    "nadirclaw_complex_model": "NADIRCLAW_COMPLEX_MODEL",
+    "nadirclaw_reasoning_model": "NADIRCLAW_REASONING_MODEL",
+    "nadirclaw_free_model": "NADIRCLAW_FREE_MODEL",
+    "nadirclaw_auth_token": "NADIRCLAW_AUTH_TOKEN",
+    "gemini_api_key": "GEMINI_API_KEY",
+    "anthropic_api_key": "ANTHROPIC_API_KEY",
+    "openai_api_key": "OPENAI_API_KEY",
+    "deepseek_api_key": "DEEPSEEK_API_KEY",
+    "ollama_api_base": "OLLAMA_API_BASE",
+    "nadirclaw_confidence_threshold": "NADIRCLAW_CONFIDENCE_THRESHOLD",
+    "nadirclaw_port": "NADIRCLAW_PORT",
+    "nadirclaw_log_dir": "NADIRCLAW_LOG_DIR",
+    "nadirclaw_log_raw": "NADIRCLAW_LOG_RAW",
+    "nadirclaw_models": "NADIRCLAW_MODELS",
+    "otel_exporter_otlp_endpoint": "OTEL_EXPORTER_OTLP_ENDPOINT",
+}
+
+_SETUP_WEBHOOK_ALLOWED_VARS = set(_SETUP_WEBHOOK_FIELD_TO_ENV.values())
+
+
 # ---------------------------------------------------------------------------
 # Logging helper
 # ---------------------------------------------------------------------------
@@ -220,6 +271,48 @@ def _extract_request_metadata(request: ChatCompletionRequest) -> Dict[str, Any]:
     }
 
 
+def _upsert_nadirclaw_env_var(key: str, value: str) -> Path:
+    """Upsert a key/value in ~/.nadirclaw/.env and return its path."""
+    config_dir = Path.home() / ".nadirclaw"
+    env_path = config_dir / ".env"
+    config_dir.mkdir(parents=True, exist_ok=True)
+
+    lines: List[str] = []
+    if env_path.exists():
+        lines = env_path.read_text().splitlines()
+
+    new_line = f"{key}={value}"
+    replaced = False
+    for i, line in enumerate(lines):
+        if line.strip().startswith(f"{key}="):
+            lines[i] = new_line
+            replaced = True
+            break
+
+    if not replaced:
+        if lines and lines[-1].strip() != "":
+            lines.append("")
+        lines.append(new_line)
+
+    env_path.write_text("\n".join(lines) + "\n")
+    return env_path
+
+
+def _remove_nadirclaw_env_var(key: str) -> Path:
+    """Remove a key from ~/.nadirclaw/.env and return its path."""
+    config_dir = Path.home() / ".nadirclaw"
+    env_path = config_dir / ".env"
+    config_dir.mkdir(parents=True, exist_ok=True)
+
+    lines: List[str] = []
+    if env_path.exists():
+        lines = env_path.read_text().splitlines()
+
+    filtered = [line for line in lines if not line.strip().startswith(f"{key}=")]
+    env_path.write_text("\n".join(filtered).rstrip("\n") + ("\n" if filtered else ""))
+    return env_path
+
+
 # ---------------------------------------------------------------------------
 # Startup
 # ---------------------------------------------------------------------------
@@ -257,6 +350,9 @@ async def startup():
         litellm.set_verbose = False
         logger.info("Simple model:  %s", settings.SIMPLE_MODEL)
         logger.info("Complex model: %s", settings.COMPLEX_MODEL)
+        logger.info("Reasoning model: %s", settings.REASONING_MODEL)
+        logger.info("Free model:    %s", settings.FREE_MODEL)
+        logger.info("Confidence threshold: %s", settings.CONFIDENCE_THRESHOLD)
         if settings.has_explicit_tiers:
             logger.info("Tier config:   explicit (env vars)")
         else:
@@ -1074,6 +1170,366 @@ def _build_streaming_response(
 # ---------------------------------------------------------------------------
 # /v1/logs — view request logs
 # ---------------------------------------------------------------------------
+
+
+@app.post("/v1/setup/webhook")
+async def setup_webhook(
+    payload: SetupWebhookRequest,
+    current_user: UserSession = Depends(validate_local_auth),
+) -> Dict[str, Any]:
+    """Apply setup-related env config from webhook and return Ollama discovery."""
+    _ = current_user  # endpoint is auth-protected; user object intentionally unused
+    return _apply_setup_updates(payload)
+
+
+def _apply_setup_updates(payload: SetupWebhookRequest) -> Dict[str, Any]:
+    """Apply setup/env updates and optionally fetch Ollama models."""
+    from nadirclaw.auth import reload_local_users
+    from nadirclaw.routing import get_session_cache
+    from nadirclaw.setup import fetch_provider_models, _normalize_ollama_api_base
+
+    requested_env = payload.env or {}
+    env_updates: Dict[str, str] = {}
+    ignored_vars: List[str] = []
+
+    for key, raw_value in requested_env.items():
+        raw_key = str(key)
+        key_lower = raw_key.lower()
+
+        env_key: Optional[str] = None
+        if key_lower in _SETUP_WEBHOOK_FIELD_TO_ENV:
+            env_key = _SETUP_WEBHOOK_FIELD_TO_ENV[key_lower]
+        elif raw_key in _SETUP_WEBHOOK_ALLOWED_VARS:
+            # Backward compatibility for older clients using uppercase env var names.
+            env_key = raw_key
+
+        if not env_key:
+            ignored_vars.append(raw_key)
+            continue
+        if raw_value is None:
+            continue
+        if isinstance(raw_value, bool):
+            env_updates[env_key] = "true" if raw_value else "false"
+        else:
+            env_updates[env_key] = str(raw_value)
+
+    # Backward-compatible top-level field still supported.
+    if payload.ollama_api_base:
+        env_updates["OLLAMA_API_BASE"] = payload.ollama_api_base
+
+    base = _normalize_ollama_api_base(
+        env_updates.get("OLLAMA_API_BASE", settings.OLLAMA_API_BASE)
+    )
+    env_updates["OLLAMA_API_BASE"] = base
+
+    def _mask_env_value(key: str, value: Optional[str]) -> str:
+        """Mask sensitive env values in logs while keeping debug usefulness."""
+        if value is None:
+            return "<unset>"
+        key_upper = key.upper()
+        is_secret = (
+            key_upper.endswith("_TOKEN")
+            or key_upper.endswith("_API_KEY")
+            or "PASSWORD" in key_upper
+            or "SECRET" in key_upper
+        )
+        if not is_secret:
+            return value
+        if value == "":
+            return "<empty-secret>"
+        if len(value) <= 8:
+            return "*" * len(value)
+        return f"{value[:4]}***{value[-2:]} (len={len(value)})"
+
+    updated_keys = sorted(env_updates.keys())
+
+    before_after = [
+        {
+            "key": key,
+            "before": _mask_env_value(key, os.environ.get(key)),
+            "after": _mask_env_value(key, value),
+        }
+        for key, value in sorted(env_updates.items())
+    ]
+
+    change_lines = (
+        [
+            f"  - {item['key']:<32} {item['before']}  ->  {item['after']}"
+            for item in before_after
+        ]
+        if before_after
+        else ["  (no values updated)"]
+    )
+    changes_block = "\n".join(change_lines)
+    ignored_keys = sorted(ignored_vars)
+
+    logger.info(
+        "Settings update requested\n"
+        "  fetch_models: %s\n"
+        "  updated_keys: %s\n"
+        "  ignored_keys: %s\n"
+        "  changes:\n%s",
+        payload.fetch_models,
+        updated_keys,
+        ignored_keys,
+        changes_block,
+    )
+    env_path: Optional[Path] = None
+    for key, value in env_updates.items():
+        os.environ[key] = value
+        env_path = _upsert_nadirclaw_env_var(key, value)
+
+    resolved_env_path = env_path if isinstance(env_path, Path) else (Path.home() / ".nadirclaw" / ".env")
+
+    # Refresh auth/token mapping and clear routing cache so new models/tokens
+    # are effective immediately for subsequent requests.
+    reload_local_users()
+    cache_cleared = get_session_cache().clear()
+
+    models: List[str] = []
+    if payload.fetch_models:
+        models = fetch_provider_models("ollama", "", ollama_api_base=base)
+
+    logger.info(
+        "Settings update applied\n"
+        "  env_file: %s\n"
+        "  updated_count: %d\n"
+        "  cache_cleared: %d\n"
+        "  model_count: %d",
+        resolved_env_path,
+        len(updated_keys),
+        cache_cleared,
+        len(models),
+    )
+    return {
+        "status": "ok",
+        "ollama_api_base": base,
+        "env_file": str(resolved_env_path),
+        "updated": env_updates,
+        "ignored": ignored_vars,
+        "cache_cleared": cache_cleared,
+        "models": models,
+        "model_count": len(models),
+    }
+
+
+@app.get("/admin")
+async def admin_settings_page(request: Request):
+    """Admin UI for setup webhook-backed settings."""
+    if not is_admin_authenticated(request):
+        return render_admin_login()
+    return render_admin_settings(result=None, settings_obj=settings)
+
+
+@app.post("/admin/provider-models")
+async def admin_provider_models(
+    request: Request,
+    payload: AdminProviderModelsRequest,
+):
+    """Return available model names for a provider (for admin comboboxes)."""
+    if not is_admin_authenticated(request):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    from nadirclaw.credentials import detect_provider, get_credential
+    from nadirclaw.setup import fetch_provider_models
+
+    raw_provider = (payload.provider or "").strip().lower()
+    provider_key = raw_provider
+    if provider_key in {"", "custom", "other", "auto"}:
+        return {"provider": raw_provider, "models": [], "count": 0}
+
+    # Map provider aliases for fetching.
+    fetch_provider_key = "openai" if provider_key == "openai-codex" else provider_key
+
+    credential = ""
+    if fetch_provider_key != "ollama":
+        override = (payload.credential_override or "").strip()
+        credential = override or get_credential(provider_key) or get_credential(fetch_provider_key) or ""
+        # OpenAI model listing should also work when user only has openai-codex OAuth.
+        if not credential and fetch_provider_key == "openai":
+            credential = get_credential("openai-codex") or ""
+
+    try:
+        models = fetch_provider_models(
+            fetch_provider_key,
+            credential,
+            ollama_api_base=payload.ollama_api_base or settings.OLLAMA_API_BASE,
+        )
+    except Exception as e:
+        logger.warning("Failed to load provider models for admin UI: provider=%s error=%s", provider_key, e)
+        return {"provider": provider_key, "models": [], "count": 0}
+
+    # Fallback to local registry if API fetch returns empty.
+    if not models:
+        try:
+            from nadirclaw.routing import MODEL_REGISTRY
+
+            models = [
+                m for m in MODEL_REGISTRY.keys()
+                if (detect_provider(m) or "") == fetch_provider_key
+            ]
+        except Exception:
+            models = []
+
+    # Admin textbox stores model name without provider prefix.
+    normalized: List[str] = []
+    prefix = f"{provider_key}/"
+    for m in models:
+        val = m.strip()
+        if not val:
+            continue
+        if val.lower().startswith(prefix):
+            val = val[len(prefix):]
+        normalized.append(val)
+
+    unique_models = sorted(set(normalized))
+    return {
+        "provider": provider_key,
+        "models": unique_models,
+        "count": len(unique_models),
+    }
+
+
+@app.post("/admin/login")
+async def admin_login(request: Request):
+    """Login endpoint for admin settings UI."""
+    form = parse_form_body(await request.body())
+    password = form.get("password", "")
+
+    admin_password = get_admin_password(settings.AUTH_TOKEN)
+    if not admin_password:
+        return render_admin_login(
+            "Admin login is not configured. Set NADIRCLAW_ADMIN_PASSWORD or NADIRCLAW_AUTH_TOKEN."
+        )
+
+    if password != admin_password:
+        return render_admin_login("Invalid password.")
+
+    token = create_admin_session()
+    resp = RedirectResponse(url="/admin", status_code=303)
+    resp.set_cookie(
+        key=admin_session_cookie_name(),
+        value=token,
+        httponly=True,
+        samesite="lax",
+        max_age=admin_session_ttl_seconds(),
+    )
+    return resp
+
+
+@app.post("/admin/logout")
+async def admin_logout(request: Request):
+    """Logout endpoint for admin settings UI."""
+    token = request.cookies.get(admin_session_cookie_name(), "")
+    pop_admin_session(token)
+
+    resp = RedirectResponse(url="/admin", status_code=303)
+    resp.delete_cookie(admin_session_cookie_name())
+    return resp
+
+
+@app.post("/admin/settings")
+async def admin_update_settings(request: Request):
+    """Apply settings from admin UI via the same logic as setup webhook."""
+    if not is_admin_authenticated(request):
+        return render_admin_login("Session expired. Please login again.")
+
+    form = parse_form_body(await request.body())
+
+    def _compose_tier_model(provider: str, model_name: str) -> str:
+        """Compose full model id from provider combobox + model textbox."""
+        m = model_name.strip()
+        if not m:
+            return ""
+        if "/" in m:
+            return m
+
+        p = provider.strip().lower()
+        if not p or p in {"custom", "other", "auto"}:
+            return m
+
+        # Keep canonical no-prefix style for these providers.
+        if p in {"openai", "google", "anthropic"}:
+            return m
+
+        # Prefix style providers.
+        return f"{p}/{m}"
+
+    env_payload: Dict[str, Any] = {}
+    model_tier_fields = {
+        "nadirclaw_simple_model",
+        "nadirclaw_complex_model",
+        "nadirclaw_reasoning_model",
+        "nadirclaw_free_model",
+    }
+
+    # Handle tier models from provider+model UI controls.
+    for field_name in model_tier_fields:
+        raw_model = form.get(field_name)
+        if raw_model is None:
+            continue
+        model_name = str(raw_model).strip()
+        if model_name == "":
+            continue
+        provider_name = str(form.get(f"{field_name}_provider", "")).strip()
+        composed = _compose_tier_model(provider_name, model_name)
+        if composed:
+            env_payload[field_name] = composed
+
+    for field_name in _SETUP_WEBHOOK_FIELD_TO_ENV:
+        if field_name in model_tier_fields:
+            continue
+        raw = form.get(field_name)
+        if raw is None:
+            continue
+        value = str(raw).strip()
+        if value == "":
+            continue
+        env_payload[field_name] = value
+
+    clear_secret_map = {
+        "clear_nadirclaw_auth_token": "NADIRCLAW_AUTH_TOKEN",
+        "clear_gemini_api_key": "GEMINI_API_KEY",
+        "clear_anthropic_api_key": "ANTHROPIC_API_KEY",
+        "clear_openai_api_key": "OPENAI_API_KEY",
+        "clear_deepseek_api_key": "DEEPSEEK_API_KEY",
+    }
+    cleared_env_keys: List[str] = []
+    for clear_field, env_key in clear_secret_map.items():
+        if str(form.get(clear_field, "")).strip().lower() in {"1", "true", "on", "yes"}:
+            os.environ.pop(env_key, None)
+            _remove_nadirclaw_env_var(env_key)
+            cleared_env_keys.append(env_key)
+
+    payload = SetupWebhookRequest(
+        ollama_api_base=str(form.get("ollama_api_base", "")).strip() or None,
+        fetch_models=form.get("fetch_models") == "on",
+        env=env_payload,
+    )
+
+    logger.info(
+        "Admin settings save requested: client=%s form_fields=%d env_fields=%d fetch_models=%s cleared_keys=%s",
+        request.client.host if request.client else "unknown",
+        len(form),
+        len(env_payload),
+        payload.fetch_models,
+        cleared_env_keys,
+    )
+
+    result = _apply_setup_updates(payload)
+    if cleared_env_keys:
+        result["cleared"] = cleared_env_keys
+
+    logger.info(
+        "Admin settings save completed: client=%s updated_count=%d cache_cleared=%s model_count=%s",
+        request.client.host if request.client else "unknown",
+        len(result.get("updated", {})),
+        result.get("cache_cleared", 0),
+        result.get("model_count", 0),
+    )
+
+    return render_admin_settings(result=result, settings_obj=settings)
+
 
 @app.get("/v1/logs")
 async def view_logs(

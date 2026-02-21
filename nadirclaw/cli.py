@@ -9,6 +9,31 @@ from pathlib import Path
 import click
 
 
+def _print_table(title, headers, rows):
+    """Render a simple ASCII table for CLI output."""
+    str_headers = [str(h) for h in headers]
+    str_rows = [[str(cell) for cell in row] for row in rows]
+
+    widths = [len(h) for h in str_headers]
+    for row in str_rows:
+        for i, cell in enumerate(row):
+            widths[i] = max(widths[i], len(cell))
+
+    def _line(sep: str = "+") -> str:
+        return sep + sep.join("-" * (w + 2) for w in widths) + sep
+
+    def _row(values) -> str:
+        return "| " + " | ".join(str(v).ljust(widths[i]) for i, v in enumerate(values)) + " |"
+
+    click.echo(title)
+    click.echo(_line())
+    click.echo(_row(str_headers))
+    click.echo(_line())
+    for row in str_rows:
+        click.echo(_row(row))
+    click.echo(_line())
+
+
 @click.group()
 @click.version_option(version=None, prog_name="nadirclaw", package_name="nadirclaw")
 def main():
@@ -125,31 +150,48 @@ def status():
     from nadirclaw.credentials import list_credentials
     from nadirclaw.settings import settings
 
-    click.echo("NadirClaw Status")
-    click.echo("-" * 40)
-    click.echo(f"Simple model:  {settings.SIMPLE_MODEL}")
-    click.echo(f"Complex model: {settings.COMPLEX_MODEL}")
-    if settings.has_explicit_tiers:
-        click.echo("Tier config:   explicit (env vars)")
-    else:
-        click.echo("Tier config:   derived from NADIRCLAW_MODELS")
-    click.echo(f"Port:          {settings.PORT}")
-    click.echo(f"Threshold:     {settings.CONFIDENCE_THRESHOLD}")
-    click.echo(f"Log dir:       {settings.LOG_DIR}")
+    tier_config = (
+        "explicit (env vars)"
+        if settings.has_explicit_tiers
+        else "derived from NADIRCLAW_MODELS"
+    )
+
     token = settings.AUTH_TOKEN
-    if token:
-        click.echo(f"Auth:          {token[:6]}***" if len(token) >= 6 else f"Auth:          {token}")
-    else:
-        click.echo("Auth:          disabled (local-only)")
+    auth_display = (
+        (f"{token[:6]}***" if len(token) >= 6 else token)
+        if token
+        else "disabled (local-only)"
+    )
+
+    _print_table(
+        "NadirClaw Status",
+        ("Setting", "Value"),
+        [
+            ("Simple model", settings.SIMPLE_MODEL),
+            ("Complex model", settings.COMPLEX_MODEL),
+            ("Reasoning model", settings.REASONING_MODEL),
+            ("Free model", settings.FREE_MODEL),
+            ("Tier config", tier_config),
+            ("Port", settings.PORT),
+            ("Threshold", settings.CONFIDENCE_THRESHOLD),
+            ("Log dir", settings.LOG_DIR),
+            ("Auth", auth_display),
+        ],
+    )
 
     # Show credential status
     creds = list_credentials()
     if creds:
-        click.echo(f"\nCredentials:   {len(creds)} provider(s)")
-        for c in creds:
-            click.echo(f"  {c['provider']:12s}  {c['masked_token']}  ({c['source']})")
+        _print_table(
+            "\nCredentials",
+            ("Provider", "Token", "Source"),
+            [
+                (c["provider"], c["masked_token"], c["source"])
+                for c in creds
+            ],
+        )
     else:
-        click.echo("\nCredentials:   none configured")
+        _print_table("\nCredentials", ("Provider", "Token", "Source"), [("-", "none configured", "-")])
         click.echo("  Run 'nadirclaw auth add' or set env vars (ANTHROPIC_API_KEY, etc.)")
 
     # Check if server is running
@@ -158,9 +200,11 @@ def status():
         req = urllib.request.Request(url)
         with urllib.request.urlopen(req, timeout=2) as resp:
             data = json.loads(resp.read())
-            click.echo(f"\nServer:        RUNNING ({data.get('status', '?')})")
+            server_status = f"RUNNING ({data.get('status', '?')})"
     except Exception:
-        click.echo("\nServer:        NOT RUNNING")
+        server_status = "NOT RUNNING"
+
+    _print_table("\nServer", ("Field", "Value"), [("Status", server_status)])
 
 
 @main.command()
