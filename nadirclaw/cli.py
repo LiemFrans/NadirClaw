@@ -64,13 +64,14 @@ def setup(reconfigure):
 
 @main.command()
 @click.option("--port", default=None, type=int, help="Port to listen on (default: 8856)")
+@click.option("--host", default=None, help="Host to bind to (default: 0.0.0.0)")
 @click.option("--simple-model", default=None, help="Model for simple prompts")
 @click.option("--complex-model", default=None, help="Model for complex prompts")
 @click.option("--models", default=None, help="Comma-separated model list (legacy)")
 @click.option("--token", default=None, help="Auth token")
 @click.option("--verbose", is_flag=True, help="Enable verbose logging")
 @click.option("--log-raw", is_flag=True, help="Log full raw requests and responses to JSONL")
-def serve(port, simple_model, complex_model, models, token, verbose, log_raw):
+def serve(port, host, simple_model, complex_model, models, token, verbose, log_raw):
     """Start the NadirClaw router server."""
     import logging
 
@@ -90,6 +91,8 @@ def serve(port, simple_model, complex_model, models, token, verbose, log_raw):
     # Override env vars from CLI flags
     if port:
         os.environ["NADIRCLAW_PORT"] = str(port)
+    if host:
+        os.environ["NADIRCLAW_HOST"] = host
     if simple_model:
         os.environ["NADIRCLAW_SIMPLE_MODEL"] = simple_model
     if complex_model:
@@ -113,12 +116,14 @@ def serve(port, simple_model, complex_model, models, token, verbose, log_raw):
     from nadirclaw.settings import settings
 
     actual_port = port or settings.PORT
-    click.echo(f"Starting NadirClaw on port {actual_port}...")
+    actual_host = host or settings.HOST
+    click.echo(f"Starting NadirClaw on {actual_host}:{actual_port}...")
+    click.echo(f"  Admin dashboard: http://{actual_host}:{actual_port}/admin")
     click.echo(f"  Simple model:  {settings.SIMPLE_MODEL}")
     click.echo(f"  Complex model: {settings.COMPLEX_MODEL}")
     uvicorn.run(
         "nadirclaw.server:app",
-        host="0.0.0.0",
+        host=actual_host,
         port=actual_port,
         log_level=log_level,
     )
