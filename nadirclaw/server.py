@@ -42,12 +42,6 @@ from nadirclaw.settings import settings
 logger = logging.getLogger("nadirclaw")
 
 
-def _format_model_chain(models: List[str]) -> str:
-    """Format ordered model chain for logs (primary -> failover...)."""
-    vals = [m for m in (models or []) if m]
-    return " -> ".join(vals) if vals else "-"
-
-
 def _format_failover_only(models: List[str]) -> str:
     """Format fallback-only chain (exclude primary at index 0)."""
     vals = [m for m in (models or []) if m]
