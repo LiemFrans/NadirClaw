@@ -1274,14 +1274,6 @@ def _apply_setup_updates(payload: SetupWebhookRequest) -> Dict[str, Any]:
         ignored_keys,
         changes_block,
     )
-    print(
-        "[NadirClaw] Settings update requested\n"
-        f"  fetch_models: {payload.fetch_models}\n"
-        f"  updated_keys: {updated_keys}\n"
-        f"  ignored_keys: {ignored_keys}\n"
-        f"  changes:\n{changes_block}"
-    )
-
     env_path: Optional[Path] = None
     for key, value in env_updates.items():
         os.environ[key] = value
@@ -1309,14 +1301,6 @@ def _apply_setup_updates(payload: SetupWebhookRequest) -> Dict[str, Any]:
         cache_cleared,
         len(models),
     )
-    print(
-        "[NadirClaw] Settings update applied\n"
-        f"  env_file: {resolved_env_path}\n"
-        f"  updated_count: {len(updated_keys)}\n"
-        f"  cache_cleared: {cache_cleared}\n"
-        f"  model_count: {len(models)}"
-    )
-
     return {
         "status": "ok",
         "ollama_api_base": base,

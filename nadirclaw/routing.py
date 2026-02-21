@@ -394,6 +394,11 @@ class SessionCache:
                 pass
         return len(expired)
 
+    def clear_expired(self) -> int:
+        """Remove expired entries. Returns number removed."""
+        with self._lock:
+            return self._clear_expired()
+
     def clear(self) -> int:
         """Clear all cached routing decisions. Returns number removed."""
         with self._lock:
