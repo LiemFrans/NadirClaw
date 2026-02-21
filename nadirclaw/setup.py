@@ -243,9 +243,10 @@ def _fetch_deepseek_models(credential: str) -> List[str]:
     return sorted(models)
 
 
-def _fetch_ollama_models() -> List[str]:
+def _fetch_ollama_models(ollama_api_base: str = "http://localhost:11434") -> List[str]:
     """Fetch locally installed models from Ollama."""
-    req = urllib.request.Request("http://localhost:11434/api/tags")
+    base = ollama_api_base.rstrip("/")
+    req = urllib.request.Request(f"{base}/api/tags")
     try:
         with urllib.request.urlopen(req, timeout=3) as resp:
             data = json.loads(resp.read())
@@ -320,7 +321,9 @@ def _filter_google_top(models: List[str]) -> List[str]:
     return sorted(top)
 
 
-def fetch_provider_models(provider: str, credential: str) -> List[str]:
+def fetch_provider_models(
+    provider: str, credential: str, ollama_api_base: str = "http://localhost:11434"
+) -> List[str]:
     """Fetch available model IDs from a provider's API.
 
     Returns only top current-generation models, or empty list on failure.
@@ -332,7 +335,7 @@ def fetch_provider_models(provider: str, credential: str) -> List[str]:
         "deepseek": _fetch_deepseek_models,
     }
     if provider == "ollama":
-        return _fetch_ollama_models()
+        return _fetch_ollama_models(ollama_api_base=ollama_api_base)
     fetcher = fetchers.get(provider)
     if fetcher and credential:
         raw = fetcher(credential)

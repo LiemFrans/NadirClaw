@@ -7,6 +7,7 @@ OpenAI-compatible API at /v1/chat/completions.
 
 import asyncio
 import collections
+import hmac
 import json
 import logging
 import os
@@ -19,6 +20,7 @@ from threading import Lock
 from typing import Any, Dict, List, Optional, Union
 
 from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel
@@ -112,8 +114,6 @@ app.add_middleware(
 # ---------------------------------------------------------------------------
 # Validation error handler — log request body for debugging
 # ---------------------------------------------------------------------------
-
-from fastapi.exceptions import RequestValidationError
 
 
 @app.exception_handler(RequestValidationError)
@@ -262,30 +262,45 @@ def _extract_request_metadata(request: ChatCompletionRequest) -> Dict[str, Any]:
     }
 
 
+_env_write_lock = Lock()
+
+
+def _normalize_ollama_api_base(base: Optional[str] = None) -> str:
+    """Ensure the Ollama API base URL has a scheme (defaults to http)."""
+    from nadirclaw.settings import settings as _s
+
+    raw = base or _s.OLLAMA_API_BASE
+    raw = raw.strip()
+    if raw and not raw.startswith(("http://", "https://")):
+        raw = "http://" + raw
+    return raw
+
+
 def _upsert_nadirclaw_env_var(key: str, value: str) -> Path:
     """Upsert a key/value in ~/.nadirclaw/.env and return its path."""
     config_dir = Path.home() / ".nadirclaw"
     env_path = config_dir / ".env"
     config_dir.mkdir(parents=True, exist_ok=True)
 
-    lines: List[str] = []
-    if env_path.exists():
-        lines = env_path.read_text().splitlines()
-
     new_line = f"{key}={value}"
-    replaced = False
-    for i, line in enumerate(lines):
-        if line.strip().startswith(f"{key}="):
-            lines[i] = new_line
-            replaced = True
-            break
+    with _env_write_lock:
+        lines: List[str] = []
+        if env_path.exists():
+            lines = env_path.read_text().splitlines()
 
-    if not replaced:
-        if lines and lines[-1].strip() != "":
-            lines.append("")
-        lines.append(new_line)
+        replaced = False
+        for i, line in enumerate(lines):
+            if line.strip().startswith(f"{key}="):
+                lines[i] = new_line
+                replaced = True
+                break
 
-    env_path.write_text("\n".join(lines) + "\n")
+        if not replaced:
+            if lines and lines[-1].strip() != "":
+                lines.append("")
+            lines.append(new_line)
+
+        env_path.write_text("\n".join(lines) + "\n")
     return env_path
 
 
@@ -1160,7 +1175,7 @@ async def setup_webhook(
 
 def _apply_setup_updates(payload: SetupWebhookRequest) -> Dict[str, Any]:
     """Apply setup/env updates and optionally fetch Ollama models."""
-    from nadirclaw.setup import fetch_provider_models, _normalize_ollama_api_base
+    from nadirclaw.setup import fetch_provider_models
 
     requested_env = payload.env or {}
     env_updates: Dict[str, str] = {}
@@ -1236,7 +1251,7 @@ async def admin_login(request: Request):
             "Admin login is not configured. Set NADIRCLAW_ADMIN_PASSWORD or NADIRCLAW_AUTH_TOKEN."
         )
 
-    if password != admin_password:
+    if not hmac.compare_digest(password, admin_password):
         return render_admin_login("Invalid password.")
 
     token = create_admin_session()
@@ -1286,6 +1301,7 @@ async def admin_update_settings(request: Request):
     )
     result = _apply_setup_updates(payload)
     return render_admin_settings(result=result, settings_obj=settings)
+
 
 @app.get("/v1/logs")
 async def view_logs(
