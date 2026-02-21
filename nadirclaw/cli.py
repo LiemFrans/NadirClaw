@@ -34,6 +34,14 @@ def _print_table(title, headers, rows):
     click.echo(_line())
 
 
+def _fmt_failover_only(models):
+    """Format only fallback candidates (exclude primary model at index 0)."""
+    vals = [str(m).strip() for m in (models or []) if str(m).strip()]
+    if len(vals) <= 1:
+        return "-"
+    return " -> ".join(vals[1:])
+
+
 @click.group()
 @click.version_option(version=None, prog_name="nadirclaw", package_name="nadirclaw")
 def main():
@@ -168,9 +176,13 @@ def status():
         ("Setting", "Value"),
         [
             ("Simple model", settings.SIMPLE_MODEL),
+            ("Simple failover", _fmt_failover_only(settings.SIMPLE_MODELS)),
             ("Complex model", settings.COMPLEX_MODEL),
+            ("Complex failover", _fmt_failover_only(settings.COMPLEX_MODELS)),
             ("Reasoning model", settings.REASONING_MODEL),
+            ("Reasoning failover", _fmt_failover_only(settings.REASONING_MODELS)),
             ("Free model", settings.FREE_MODEL),
+            ("Free failover", _fmt_failover_only(settings.FREE_MODELS)),
             ("Tier config", tier_config),
             ("Port", settings.PORT),
             ("Threshold", settings.CONFIDENCE_THRESHOLD),

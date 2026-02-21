@@ -231,6 +231,12 @@ def render_admin_settings(
             return m[len(prefix):]
         return m
 
+    def model_list_for_provider(provider: str, raw_list: str) -> str:
+        """Convert full model list into provider-local comma-separated names."""
+        items = [m.strip() for m in (raw_list or "").split(",") if m.strip()]
+        normalized = [model_name_for_provider(provider, m) for m in items]
+        return ",".join([m for m in normalized if m])
+
     def provider_options_html(selected: str) -> str:
         providers = [
             "ollama",
@@ -315,6 +321,23 @@ def render_admin_settings(
     reasoning_provider, reasoning_name = split_model_for_admin(reasoning_full)
     free_provider, free_name = split_model_for_admin(free_full)
 
+    simple_list_value = model_list_for_provider(
+        simple_provider,
+        os.getenv("NADIRCLAW_SIMPLE_MODELS", simple_full),
+    )
+    complex_list_value = model_list_for_provider(
+        complex_provider,
+        os.getenv("NADIRCLAW_COMPLEX_MODELS", complex_full),
+    )
+    reasoning_list_value = model_list_for_provider(
+        reasoning_provider,
+        os.getenv("NADIRCLAW_REASONING_MODELS", reasoning_full),
+    )
+    free_list_value = model_list_for_provider(
+        free_provider,
+        os.getenv("NADIRCLAW_FREE_MODELS", free_full),
+    )
+
     html = f"""
     <!doctype html>
     <html lang="en">
@@ -357,6 +380,18 @@ def render_admin_settings(
             .field {{ display: flex; flex-direction: column; gap: 6px; }}
             .field-row {{ display: flex; gap: 8px; align-items: center; }}
             .field-row input {{ flex: 1; }}
+            .failover-list {{ display: flex; flex-direction: column; gap: 8px; }}
+            .failover-row {{ display: grid; grid-template-columns: minmax(130px, 180px) 1fr auto; gap: 8px; }}
+            .icon-btn {{
+                border: 1px solid var(--panel-border);
+                border-radius: 10px;
+                background: transparent;
+                color: var(--text);
+                padding: 8px 10px;
+                cursor: pointer;
+                font-weight: 700;
+            }}
+            .icon-btn:hover {{ border-color: var(--primary); color: var(--primary); }}
             label {{ font-weight: 600; }}
             .hint {{ font-size: 12px; color: var(--muted); }}
             input, select {{
@@ -419,12 +454,16 @@ def render_admin_settings(
                 <form method="post" action="/admin/settings">
                     <div class="section">
                         <h2>Routing Models</h2>
-                        <p class="hint">Choose provider in combobox, then choose model name from provider API list.</p>
+                        <p class="hint">Choose provider, pick primary model, then add failover models using the + button below each tier.</p>
                         <div class="grid">
                             <div class="field"><label>nadirclaw_simple_model</label><div class="model-pair"><select name="nadirclaw_simple_model_provider">{provider_options_html(simple_provider)}</select><select name="nadirclaw_simple_model">{model_options_html_for_provider(simple_provider, simple_name)}</select></div></div>
                             <div class="field"><label>nadirclaw_complex_model</label><div class="model-pair"><select name="nadirclaw_complex_model_provider">{provider_options_html(complex_provider)}</select><select name="nadirclaw_complex_model">{model_options_html_for_provider(complex_provider, complex_name)}</select></div></div>
+                            <div class="field"><label>nadirclaw_simple_models (failover)</label><div id="simple-failover-list" class="failover-list" data-initial="{escape(simple_list_value, quote=True)}"></div><input type="hidden" name="nadirclaw_simple_models" value="" /><button type="button" class="icon-btn add-failover-btn" data-tier="simple">+</button></div>
+                            <div class="field"><label>nadirclaw_complex_models (failover)</label><div id="complex-failover-list" class="failover-list" data-initial="{escape(complex_list_value, quote=True)}"></div><input type="hidden" name="nadirclaw_complex_models" value="" /><button type="button" class="icon-btn add-failover-btn" data-tier="complex">+</button></div>
                             <div class="field"><label>nadirclaw_reasoning_model</label><div class="model-pair"><select name="nadirclaw_reasoning_model_provider">{provider_options_html(reasoning_provider)}</select><select name="nadirclaw_reasoning_model">{model_options_html_for_provider(reasoning_provider, reasoning_name)}</select></div></div>
                             <div class="field"><label>nadirclaw_free_model</label><div class="model-pair"><select name="nadirclaw_free_model_provider">{provider_options_html(free_provider)}</select><select name="nadirclaw_free_model">{model_options_html_for_provider(free_provider, free_name)}</select></div></div>
+                            <div class="field"><label>nadirclaw_reasoning_models (failover)</label><div id="reasoning-failover-list" class="failover-list" data-initial="{escape(reasoning_list_value, quote=True)}"></div><input type="hidden" name="nadirclaw_reasoning_models" value="" /><button type="button" class="icon-btn add-failover-btn" data-tier="reasoning">+</button></div>
+                            <div class="field"><label>nadirclaw_free_models (failover)</label><div id="free-failover-list" class="failover-list" data-initial="{escape(free_list_value, quote=True)}"></div><input type="hidden" name="nadirclaw_free_models" value="" /><button type="button" class="icon-btn add-failover-btn" data-tier="free">+</button></div>
                             <div class="field"><label>nadirclaw_models</label><input name="nadirclaw_models" value="{current('NADIRCLAW_MODELS')}" placeholder="comma-separated fallback list" /></div>
                             <div class="field"><label>nadirclaw_confidence_threshold</label><input name="nadirclaw_confidence_threshold" value="{current('NADIRCLAW_CONFIDENCE_THRESHOLD')}" placeholder="0.06" /></div>
                         </div>
@@ -464,18 +503,82 @@ def render_admin_settings(
         </main>
         <script>
             (function () {{
-                async function loadProviderModels(providerSelectName, modelSelectName, preserveCurrent = true) {{
-                    const providerEl = document.querySelector(`select[name="${{providerSelectName}}"]`);
-                    const modelEl = document.querySelector(`select[name="${{modelSelectName}}"]`);
-                    if (!providerEl || !modelEl) return;
+                const modelOptionsCache = new Map();
+                const failoverRowCounters = {{ simple: 0, complex: 0, reasoning: 0, free: 0 }};
 
-                    const provider = (providerEl.value || '').trim();
-                    if (!provider || provider === 'custom') return;
+                function tierMeta(tier) {{
+                    const map = {{
+                        simple: {{ providerSelect: 'nadirclaw_simple_model_provider', primaryModel: 'nadirclaw_simple_model', listId: 'simple-failover-list', fieldPrefix: 'nadirclaw_simple_models' }},
+                        complex: {{ providerSelect: 'nadirclaw_complex_model_provider', primaryModel: 'nadirclaw_complex_model', listId: 'complex-failover-list', fieldPrefix: 'nadirclaw_complex_models' }},
+                        reasoning: {{ providerSelect: 'nadirclaw_reasoning_model_provider', primaryModel: 'nadirclaw_reasoning_model', listId: 'reasoning-failover-list', fieldPrefix: 'nadirclaw_reasoning_models' }},
+                        free: {{ providerSelect: 'nadirclaw_free_model_provider', primaryModel: 'nadirclaw_free_model', listId: 'free-failover-list', fieldPrefix: 'nadirclaw_free_models' }},
+                    }};
+                    return map[tier];
+                }}
+
+                function composeModelId(provider, modelName) {{
+                    const m = (modelName || '').trim();
+                    if (!m) return '';
+                    if (m.includes('/')) return m;
+
+                    const p = (provider || '').trim().toLowerCase();
+                    if (!p || p === 'custom' || p === 'other' || p === 'auto') return m;
+                    if (p === 'openai' || p === 'google' || p === 'anthropic') return m;
+                    return `${{p}}/${{m}}`;
+                }}
+
+                function splitProviderModel(rawValue, fallbackProvider) {{
+                    const raw = (rawValue || '').trim();
+                    const fallback = (fallbackProvider || '').trim();
+                    if (!raw) return {{ provider: fallback, model: '' }};
+                    const slash = raw.indexOf('/');
+                    if (slash > 0) {{
+                        return {{
+                            provider: raw.slice(0, slash).trim() || fallback,
+                            model: raw.slice(slash + 1).trim(),
+                        }};
+                    }}
+                    return {{ provider: fallback, model: raw }};
+                }}
+
+                function getPrimaryModelId(tier) {{
+                    const meta = tierMeta(tier);
+                    if (!meta) return '';
+                    const providerEl = document.querySelector(`select[name="${{meta.providerSelect}}"]`);
+                    const modelEl = document.querySelector(`select[name="${{meta.primaryModel}}"]`);
+                    return composeModelId(providerEl?.value || '', modelEl?.value || '');
+                }}
+
+                function syncFailoverHidden(tier) {{
+                    const meta = tierMeta(tier);
+                    if (!meta) return;
+                    const hidden = document.querySelector(`input[name="${{meta.fieldPrefix}}"]`);
+                    const listEl = document.getElementById(meta.listId);
+                    if (!hidden || !listEl) return;
+
+                    const rows = listEl.querySelectorAll('.failover-row');
+                    const values = [];
+                    rows.forEach((row) => {{
+                        const providerName = row.dataset.providerName || '';
+                        const modelName = row.dataset.modelName || '';
+                        if (!providerName || !modelName) return;
+                        const providerEl = document.querySelector(`select[name="${{providerName}}"]`);
+                        const modelEl = document.querySelector(`select[name="${{modelName}}"]`);
+                        const full = composeModelId(providerEl?.value || '', modelEl?.value || '');
+                        if (full) values.push(full);
+                    }});
+                    hidden.value = values.join(',');
+                }}
+
+                async function fetchProviderModels(provider) {{
+                    const p = (provider || '').trim();
+                    if (!p || p === 'custom') return [];
+                    if (modelOptionsCache.has(p)) return modelOptionsCache.get(p);
 
                     const ollamaBaseEl = document.querySelector('input[name="ollama_api_base"]');
                     const ollamaBase = (ollamaBaseEl?.value || '').trim();
 
-                    function credentialOverrideForProvider(p) {{
+                    function credentialOverrideForProvider(key) {{
                         const keyByProvider = {{
                             openai: 'openai_api_key',
                             'openai-codex': 'openai_api_key',
@@ -483,7 +586,7 @@ def render_admin_settings(
                             google: 'gemini_api_key',
                             deepseek: 'deepseek_api_key',
                         }};
-                        const fieldName = keyByProvider[p] || '';
+                        const fieldName = keyByProvider[key] || '';
                         if (!fieldName) return '';
                         const fieldEl = document.querySelector(`input[name="${{fieldName}}"]`);
                         return (fieldEl?.value || '').trim();
@@ -495,17 +598,36 @@ def render_admin_settings(
                             credentials: 'same-origin',
                             headers: {{ 'Content-Type': 'application/json' }},
                             body: JSON.stringify({{
-                                provider,
+                                provider: p,
                                 ollama_api_base: ollamaBase || null,
-                                credential_override: credentialOverrideForProvider(provider) || null,
+                                credential_override: credentialOverrideForProvider(p) || null,
                             }}),
                         }});
-                        if (!res.ok) return;
-
+                        if (!res.ok) return [];
                         const data = await res.json();
                         const models = Array.isArray(data.models) ? data.models : [];
+                        modelOptionsCache.set(p, models);
+                        return models;
+                    }} catch (_e) {{
+                        return [];
+                    }}
+                }}
+
+                async function loadProviderModels(providerSelectName, modelSelectName, preserveCurrent = true, excludedModelId = '') {{
+                    const providerEl = document.querySelector(`select[name="${{providerSelectName}}"]`);
+                    const modelEl = document.querySelector(`select[name="${{modelSelectName}}"]`);
+                    if (!providerEl || !modelEl) return;
+
+                    const provider = (providerEl.value || '').trim();
+                    if (!provider || provider === 'custom') return;
+
+                    try {{
+                        const models = await fetchProviderModels(provider);
                         const current = preserveCurrent ? (modelEl.value || '').trim() : '';
-                        const options = [...new Set([...models, ...(current ? [current] : [])])].filter(Boolean).sort();
+                        const options = [...new Set([...models, ...(current ? [current] : [])])]
+                            .filter(Boolean)
+                            .filter((m) => composeModelId(provider, m) !== excludedModelId)
+                            .sort();
                         modelEl.innerHTML = options
                             .map((m) => `<option value="${{String(m).replace(/"/g, '&quot;')}}"${{m === current ? ' selected' : ''}}>${{String(m)}}</option>`)
                             .join('');
@@ -515,6 +637,72 @@ def render_admin_settings(
                     }} catch (_e) {{
                         // Keep existing options if request fails.
                     }}
+                }}
+
+                function addFailoverRow(tier, providerName = '', modelName = '') {{
+                    const meta = tierMeta(tier);
+                    if (!meta) return;
+                    const listEl = document.getElementById(meta.listId);
+                    const primaryProviderEl = document.querySelector(`select[name="${{meta.providerSelect}}"]`);
+                    if (!listEl || !primaryProviderEl) return;
+
+                    const idx = failoverRowCounters[tier] || 0;
+                    failoverRowCounters[tier] = idx + 1;
+
+                    const row = document.createElement('div');
+                    row.className = 'failover-row';
+
+                    const rowProviderName = `${{meta.fieldPrefix}}__provider__${{idx}}`;
+                    const rowModelName = `${{meta.fieldPrefix}}__item__${{idx}}`;
+                    row.dataset.providerName = rowProviderName;
+                    row.dataset.modelName = rowModelName;
+
+                    const providerSelect = document.createElement('select');
+                    providerSelect.name = rowProviderName;
+                    providerSelect.innerHTML = primaryProviderEl ? primaryProviderEl.innerHTML : '';
+                    providerSelect.value = (providerName || primaryProviderEl?.value || '').trim();
+
+                    const select = document.createElement('select');
+                    select.name = rowModelName;
+
+                    const removeBtn = document.createElement('button');
+                    removeBtn.type = 'button';
+                    removeBtn.className = 'icon-btn';
+                    removeBtn.textContent = '−';
+                    removeBtn.addEventListener('click', () => {{
+                        row.remove();
+                        syncFailoverHidden(tier);
+                    }});
+
+                    providerSelect.addEventListener('change', () => {{
+                        loadProviderModels(providerSelect.name, select.name, false, getPrimaryModelId(tier)).then(() => syncFailoverHidden(tier));
+                    }});
+                    select.addEventListener('change', () => syncFailoverHidden(tier));
+
+                    row.appendChild(providerSelect);
+                    row.appendChild(select);
+                    row.appendChild(removeBtn);
+                    listEl.appendChild(row);
+
+                    loadProviderModels(providerSelect.name, select.name, false, getPrimaryModelId(tier)).then(() => {{
+                        if (modelName) select.value = modelName;
+                        syncFailoverHidden(tier);
+                    }});
+                }}
+
+                function reloadFailoverRowsForTier(tier) {{
+                    const meta = tierMeta(tier);
+                    if (!meta) return;
+                    const listEl = document.getElementById(meta.listId);
+                    if (!listEl) return;
+                    const excluded = getPrimaryModelId(tier);
+                    const rows = listEl.querySelectorAll('.failover-row');
+                    rows.forEach((row) => {{
+                        const providerName = row.dataset.providerName || '';
+                        const modelName = row.dataset.modelName || '';
+                        if (!providerName || !modelName) return;
+                        loadProviderModels(providerName, modelName, true, excluded).then(() => syncFailoverHidden(tier));
+                    }});
                 }}
 
                 const pairs = [
@@ -533,17 +721,64 @@ def render_admin_settings(
                                 modelEl.innerHTML = '';
                                 modelEl.value = '';
                             }}
+                            const tier = providerName.replace('_model_provider', '').replace('nadirclaw_', '');
                             loadProviderModels(providerName, modelName, false);
+                            reloadFailoverRowsForTier(tier);
                         }});
                         loadProviderModels(providerName, modelName);
                     }}
+                    if (modelEl) {{
+                        modelEl.addEventListener('change', () => {{
+                            const tier = modelName.replace('_model', '').replace('nadirclaw_', '');
+                            reloadFailoverRowsForTier(tier);
+                        }});
+                    }}
+                }}
+
+                const addButtons = document.querySelectorAll('.add-failover-btn');
+                addButtons.forEach((btn) => {{
+                    btn.addEventListener('click', () => {{
+                        const tier = btn.getAttribute('data-tier');
+                        addFailoverRow(tier || '');
+                    }});
+                }});
+
+                for (const tier of ['simple', 'complex', 'reasoning', 'free']) {{
+                    const meta = tierMeta(tier);
+                    const listEl = meta ? document.getElementById(meta.listId) : null;
+                    if (!meta || !listEl) continue;
+                    const primaryProviderEl = document.querySelector(`select[name="${{meta.providerSelect}}"]`);
+                    const primaryProvider = (primaryProviderEl?.value || '').trim();
+                    const primaryModelId = getPrimaryModelId(tier);
+                    const initial = (listEl.getAttribute('data-initial') || '').split(',').map((v) => v.trim()).filter(Boolean);
+                    if (initial.length === 0) continue;
+                    initial.forEach((raw) => {{
+                        const parsed = splitProviderModel(raw, primaryProvider);
+                        const composed = composeModelId(parsed.provider, parsed.model);
+                        if (!parsed.model || composed === primaryModelId) return;
+                        addFailoverRow(tier, parsed.provider, parsed.model);
+                    }});
+                    syncFailoverHidden(tier);
+                }}
+
+                const settingsForm = document.querySelector('form[action="/admin/settings"]');
+                if (settingsForm) {{
+                    settingsForm.addEventListener('submit', () => {{
+                        for (const tier of ['simple', 'complex', 'reasoning', 'free']) {{
+                            syncFailoverHidden(tier);
+                        }}
+                    }});
                 }}
 
                 const ollamaBaseEl = document.querySelector('input[name="ollama_api_base"]');
                 if (ollamaBaseEl) {{
                     ollamaBaseEl.addEventListener('change', () => {{
+                        modelOptionsCache.clear();
                         for (const [providerName, modelName] of pairs) {{
                             loadProviderModels(providerName, modelName);
+                        }}
+                        for (const tier of ['simple', 'complex', 'reasoning', 'free']) {{
+                            reloadFailoverRowsForTier(tier);
                         }}
                     }});
                 }}

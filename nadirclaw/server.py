@@ -16,7 +16,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -40,6 +40,14 @@ from nadirclaw.auth import UserSession, validate_local_auth
 from nadirclaw.settings import settings
 
 logger = logging.getLogger("nadirclaw")
+
+
+def _format_failover_only(models: List[str]) -> str:
+    """Format fallback-only chain (exclude primary at index 0)."""
+    vals = [m for m in (models or []) if m]
+    if len(vals) <= 1:
+        return "-"
+    return " -> ".join(vals[1:])
 
 
 # ---------------------------------------------------------------------------
@@ -191,9 +199,13 @@ class AdminProviderModelsRequest(BaseModel):
 
 _SETUP_WEBHOOK_FIELD_TO_ENV = {
     "nadirclaw_simple_model": "NADIRCLAW_SIMPLE_MODEL",
+    "nadirclaw_simple_models": "NADIRCLAW_SIMPLE_MODELS",
     "nadirclaw_complex_model": "NADIRCLAW_COMPLEX_MODEL",
+    "nadirclaw_complex_models": "NADIRCLAW_COMPLEX_MODELS",
     "nadirclaw_reasoning_model": "NADIRCLAW_REASONING_MODEL",
+    "nadirclaw_reasoning_models": "NADIRCLAW_REASONING_MODELS",
     "nadirclaw_free_model": "NADIRCLAW_FREE_MODEL",
+    "nadirclaw_free_models": "NADIRCLAW_FREE_MODELS",
     "nadirclaw_auth_token": "NADIRCLAW_AUTH_TOKEN",
     "gemini_api_key": "GEMINI_API_KEY",
     "anthropic_api_key": "ANTHROPIC_API_KEY",
@@ -349,9 +361,13 @@ async def startup():
         import litellm
         litellm.set_verbose = False
         logger.info("Simple model:  %s", settings.SIMPLE_MODEL)
+        logger.info("Simple failover:  %s", _format_failover_only(settings.SIMPLE_MODELS))
         logger.info("Complex model: %s", settings.COMPLEX_MODEL)
+        logger.info("Complex failover: %s", _format_failover_only(settings.COMPLEX_MODELS))
         logger.info("Reasoning model: %s", settings.REASONING_MODEL)
+        logger.info("Reasoning failover: %s", _format_failover_only(settings.REASONING_MODELS))
         logger.info("Free model:    %s", settings.FREE_MODEL)
+        logger.info("Free failover:    %s", _format_failover_only(settings.FREE_MODELS))
         logger.info("Confidence threshold: %s", settings.CONFIDENCE_THRESHOLD)
         if settings.has_explicit_tiers:
             logger.info("Tier config:   explicit (env vars)")
@@ -771,49 +787,95 @@ async def _call_with_fallback(
     provider: str | None,
     analysis_info: Dict[str, Any],
 ) -> tuple:
-    """Try the selected model; on rate limit, fall back to the other tier.
+    """Try the selected model; on runtime failure, fall back within tier then cross-tier.
 
-    The primary model retries up to MAX_RETRIES times.
-    The fallback model is tried once (no retries) to avoid long waits.
+    Same-tier failover is attempted first using configured tier model lists.
+    If same-tier failover does not succeed, cross-tier fallback is attempted.
 
     Returns (response_data, actual_model_used, updated_analysis_info).
     """
     from nadirclaw.credentials import detect_provider
 
+    def _tier_failover_models(tier: str) -> list[str]:
+        mapping = {
+            "simple": settings.SIMPLE_MODELS,
+            "complex": settings.COMPLEX_MODELS,
+            "reasoning": settings.REASONING_MODELS,
+            "free": settings.FREE_MODELS,
+        }
+        return list(mapping.get((tier or "").lower(), []))
+
     try:
         response_data = await _dispatch_model(selected_model, request, provider)
         return response_data, selected_model, analysis_info
-    except RateLimitExhausted as e:
-        # Determine fallback model (swap tiers)
+    except Exception as primary_error:
+        current_tier = (analysis_info.get("tier") or "").lower()
+        err_type = type(primary_error).__name__
+
+        # 1) Same-tier failover chain first (if configured)
+        same_tier_candidates = [
+            m for m in _tier_failover_models(current_tier)
+            if m and m != selected_model
+        ]
+        for fallback_model in same_tier_candidates:
+            fallback_provider = detect_provider(fallback_model)
+            logger.warning(
+                "⚠️ Model failure on %s (%s) — trying same-tier failover %s",
+                selected_model,
+                err_type,
+                fallback_model,
+            )
+            try:
+                if fallback_provider == "google":
+                    response_data = await _call_gemini(
+                        fallback_model, request, fallback_provider, _retry_count=99
+                    )
+                else:
+                    response_data = await _call_litellm(
+                        fallback_model, request, fallback_provider,
+                    )
+                analysis_info = {
+                    **analysis_info,
+                    "fallback_from": selected_model,
+                    "selected_model": fallback_model,
+                    "same_tier_fallback": True,
+                    "fallback_reason": err_type,
+                    "strategy": analysis_info.get("strategy", "smart-routing") + "+same-tier-fallback",
+                }
+                return response_data, fallback_model, analysis_info
+            except Exception:
+                continue
+
+        # 2) Determine cross-tier fallback model (swap tiers)
         if selected_model == settings.SIMPLE_MODEL:
-            fallback_model = settings.COMPLEX_MODEL
+            fallback_model = settings.COMPLEX_MODELS[0] if settings.COMPLEX_MODELS else settings.COMPLEX_MODEL
         elif selected_model == settings.COMPLEX_MODEL:
-            fallback_model = settings.SIMPLE_MODEL
+            fallback_model = settings.SIMPLE_MODELS[0] if settings.SIMPLE_MODELS else settings.SIMPLE_MODEL
         else:
             # Direct model request — try simple first, then complex
-            fallback_model = settings.SIMPLE_MODEL
+            fallback_model = settings.SIMPLE_MODELS[0] if settings.SIMPLE_MODELS else settings.SIMPLE_MODEL
 
-        # Don't fall back to the same model
         if fallback_model == selected_model:
             logger.error(
-                "Rate limit on %s but fallback is the same model. Returning error.",
+                "Model failure on %s (%s) but fallback is the same model. Returning graceful error.",
                 selected_model,
+                err_type,
             )
             return _rate_limit_error_response(selected_model), selected_model, analysis_info
 
         logger.warning(
-            "⚡ Rate limit on %s — falling back to %s",
-            selected_model, fallback_model,
+            "⚠️ Model failure on %s (%s) — falling back to %s",
+            selected_model,
+            err_type,
+            fallback_model,
         )
         fallback_provider = detect_provider(fallback_model)
 
         try:
-            # Call fallback without retries — one shot only.
-            # Pass _retry_count >= MAX_RETRIES so it raises immediately on 429.
             if fallback_provider == "google":
                 response_data = await _call_gemini(
                     fallback_model, request, fallback_provider,
-                    _retry_count=99,  # Skip retries — one shot only
+                    _retry_count=99,
                 )
             else:
                 response_data = await _call_litellm(
@@ -823,25 +885,25 @@ async def _call_with_fallback(
                 **analysis_info,
                 "fallback_from": selected_model,
                 "selected_model": fallback_model,
+                "fallback_reason": err_type,
                 "strategy": analysis_info.get("strategy", "smart-routing") + "+fallback",
             }
             return response_data, fallback_model, analysis_info
-        except RateLimitExhausted:
-            # Both models are rate-limited
+        except Exception:
             logger.error(
-                "Both %s and %s are rate-limited. Returning error.",
-                selected_model, fallback_model,
+                "Primary model %s and fallback model %s both failed.",
+                selected_model,
+                fallback_model,
             )
             return _rate_limit_error_response(selected_model), selected_model, analysis_info
 
 
 def _rate_limit_error_response(model: str) -> Dict[str, Any]:
-    """Build a graceful response when all models are rate-limited."""
+    """Build a graceful response when all candidate models fail."""
     return {
         "content": (
-            "⚠️ All configured models are currently rate-limited. "
-            "Please wait a minute and try again, or consider upgrading your API plan. "
-            "Check limits at https://ai.google.dev/gemini-api/docs/rate-limits"
+            "⚠️ All configured candidate models failed for this request. "
+            "Please verify model availability/credentials and try again."
         ),
         "finish_reason": "stop",
         "prompt_tokens": 0,
@@ -1462,6 +1524,12 @@ async def admin_update_settings(request: Request):
         "nadirclaw_reasoning_model",
         "nadirclaw_free_model",
     }
+    model_tier_list_fields = {
+        "nadirclaw_simple_models",
+        "nadirclaw_complex_models",
+        "nadirclaw_reasoning_models",
+        "nadirclaw_free_models",
+    }
 
     # Handle tier models from provider+model UI controls.
     for field_name in model_tier_fields:
@@ -1476,8 +1544,58 @@ async def admin_update_settings(request: Request):
         if composed:
             env_payload[field_name] = composed
 
+    # Handle per-tier failover lists from dynamic combobox rows.
+    for field_name in model_tier_list_fields:
+        indexed_prefix = f"{field_name}__item__"
+        indexed_items: List[Tuple[int, str, str]] = []
+        for k, raw_v in form.items():
+            if not k.startswith(indexed_prefix):
+                continue
+            suffix = k[len(indexed_prefix) :]
+            try:
+                idx = int(suffix)
+            except ValueError:
+                continue
+            v = str(raw_v).strip()
+            if v:
+                provider_v = str(form.get(f"{field_name}__provider__{idx}", "")).strip()
+                indexed_items.append((idx, provider_v, v))
+
+        indexed_items.sort(key=lambda item: item[0])
+        values: List[str] = []
+        composed_from_rows: List[str] = []
+
+        if indexed_items:
+            for _, provider_name, model_name in indexed_items:
+                composed = _compose_tier_model(provider_name, model_name)
+                if composed:
+                    composed_from_rows.append(composed)
+        else:
+            # Backward compatibility for old comma-separated textbox payload.
+            raw_models = form.get(field_name)
+            if raw_models is not None:
+                values = [v.strip() for v in str(raw_models).split(",") if v.strip()]
+
+        if not composed_from_rows and not values:
+            continue
+        composed_items = composed_from_rows
+        if values:
+            provider_name = ""
+            if field_name.endswith("_simple_models"):
+                provider_name = str(form.get("nadirclaw_simple_model_provider", "")).strip()
+            elif field_name.endswith("_complex_models"):
+                provider_name = str(form.get("nadirclaw_complex_model_provider", "")).strip()
+            elif field_name.endswith("_reasoning_models"):
+                provider_name = str(form.get("nadirclaw_reasoning_model_provider", "")).strip()
+            elif field_name.endswith("_free_models"):
+                provider_name = str(form.get("nadirclaw_free_model_provider", "")).strip()
+            composed_items.extend([_compose_tier_model(provider_name, v) for v in values])
+        composed_items = [v for v in composed_items if v]
+        if composed_items:
+            env_payload[field_name] = ",".join(composed_items)
+
     for field_name in _SETUP_WEBHOOK_FIELD_TO_ENV:
-        if field_name in model_tier_fields:
+        if field_name in model_tier_fields or field_name in model_tier_list_fields:
             continue
         raw = form.get(field_name)
         if raw is None:

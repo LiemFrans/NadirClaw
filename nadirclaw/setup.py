@@ -745,6 +745,49 @@ def prompt_model_selection(tier: str, models: List[dict], providers: List[str]) 
     return chosen
 
 
+def prompt_failover_models(tier: str, models: List[dict], primary_model: Optional[str]) -> List[str]:
+    """Prompt for optional failover models in the same tier (excluding primary)."""
+    if not primary_model:
+        return []
+
+    candidates = [m["model"] for m in models if m.get("model") and m["model"] != primary_model]
+    if not candidates:
+        return []
+
+    click.echo(f"Optional failover for {tier} tier (same level):")
+    for i, model_id in enumerate(candidates, 1):
+        click.echo(f"  {i}. {model_id}")
+
+    raw = click.prompt(
+        "Select failover indexes (comma-separated, Enter to skip)",
+        default="",
+        show_default=False,
+    ).strip()
+    if not raw:
+        click.echo("  No failover selected.\n")
+        return []
+
+    selected: List[str] = []
+    seen = set()
+    for token in re.split(r"[\s,]+", raw):
+        if not token:
+            continue
+        if not token.isdigit():
+            continue
+        idx = int(token) - 1
+        if 0 <= idx < len(candidates):
+            mid = candidates[idx]
+            if mid not in seen:
+                seen.add(mid)
+                selected.append(mid)
+
+    if selected:
+        click.echo(f"  Selected failover: {', '.join(selected)}\n")
+    else:
+        click.echo("  No valid failover selected.\n")
+    return selected
+
+
 # ---------------------------------------------------------------------------
 # Step 5: Write config + summary
 # ---------------------------------------------------------------------------
@@ -754,6 +797,10 @@ def write_env_file(
     complex_model: str,
     reasoning: Optional[str] = None,
     free: Optional[str] = None,
+    simple_failovers: Optional[List[str]] = None,
+    complex_failovers: Optional[List[str]] = None,
+    reasoning_failovers: Optional[List[str]] = None,
+    free_failovers: Optional[List[str]] = None,
     api_keys: Optional[Dict[str, str]] = None,
     ollama_api_base: Optional[str] = None,
 ) -> Path:
@@ -772,6 +819,9 @@ def write_env_file(
         backup_path = CONFIG_DIR / backup_name
         shutil.copy2(ENV_FILE, backup_path)
         click.echo(f"  Backed up existing config to {backup_path}")
+
+    existing_config = detect_existing_config()
+    existing_admin_password = existing_config.get("NADIRCLAW_ADMIN_PASSWORD", "").strip()
 
     lines = [
         "# NadirClaw configuration",
@@ -794,17 +844,31 @@ def write_env_file(
     # Model routing
     lines.append("# Model Routing")
     lines.append(f"NADIRCLAW_SIMPLE_MODEL={simple}")
+    if simple_failovers:
+        lines.append(f"NADIRCLAW_SIMPLE_MODELS={','.join(simple_failovers)}")
     lines.append(f"NADIRCLAW_COMPLEX_MODEL={complex_model}")
+    if complex_failovers:
+        lines.append(f"NADIRCLAW_COMPLEX_MODELS={','.join(complex_failovers)}")
     if reasoning:
         lines.append(f"NADIRCLAW_REASONING_MODEL={reasoning}")
+        if reasoning_failovers:
+            lines.append(f"NADIRCLAW_REASONING_MODELS={','.join(reasoning_failovers)}")
     if free:
         lines.append(f"NADIRCLAW_FREE_MODEL={free}")
+        if free_failovers:
+            lines.append(f"NADIRCLAW_FREE_MODELS={','.join(free_failovers)}")
     lines.append("")
 
     # Server defaults
     lines.append("# Server")
     lines.append("NADIRCLAW_PORT=8856")
     lines.append("")
+
+    # Preserve admin password from existing config unless explicitly changed elsewhere.
+    if existing_admin_password:
+        lines.append("# Admin")
+        lines.append(f"NADIRCLAW_ADMIN_PASSWORD={existing_admin_password}")
+        lines.append("")
 
     ENV_FILE.write_text("\n".join(lines) + "\n")
 
@@ -821,6 +885,10 @@ def print_summary(
     complex_model: str,
     reasoning: Optional[str],
     free: Optional[str],
+    simple_failovers: Optional[List[str]] = None,
+    complex_failovers: Optional[List[str]] = None,
+    reasoning_failovers: Optional[List[str]] = None,
+    free_failovers: Optional[List[str]] = None,
 ):
     """Print configuration summary and next steps."""
     click.echo()
@@ -831,11 +899,15 @@ def print_summary(
     click.echo("  Configuration:")
     click.echo(f"    Providers:     {', '.join(PROVIDER_INFO[p]['display'] for p in providers)}")
     click.echo(f"    Simple model:  {simple}")
+    click.echo(f"    Simple failover:  {', '.join(simple_failovers or []) or '-'}")
     click.echo(f"    Complex model: {complex_model}")
+    click.echo(f"    Complex failover: {', '.join(complex_failovers or []) or '-'}")
     if reasoning:
         click.echo(f"    Reasoning:     {reasoning}")
+        click.echo(f"    Reasoning failover: {', '.join(reasoning_failovers or []) or '-'}")
     if free:
         click.echo(f"    Free model:    {free}")
+        click.echo(f"    Free failover: {', '.join(free_failovers or []) or '-'}")
     click.echo(f"    Config file:   {ENV_FILE}")
     click.echo()
     click.echo("  Next steps:")
@@ -931,22 +1003,30 @@ def run_setup_wizard(reconfigure: bool = False):
     if not simple_model:
         simple_model = select_default_model("simple", providers) or "gemini-2.5-flash"
         click.echo(f"  Using default simple model: {simple_model}\n")
+    simple_failovers = prompt_failover_models("simple", tiers["simple"], simple_model) if tiers["simple"] else []
 
     # Complex (required)
     complex_model = prompt_model_selection("complex", tiers["complex"], providers) if tiers["complex"] else None
     if not complex_model:
         complex_model = select_default_model("complex", providers) or "gpt-4.1"
         click.echo(f"  Using default complex model: {complex_model}\n")
+    complex_failovers = prompt_failover_models("complex", tiers["complex"], complex_model) if tiers["complex"] else []
 
     # Reasoning (optional)
     reasoning_model = None
+    reasoning_failovers: List[str] = []
     if tiers["reasoning"]:
         reasoning_model = prompt_model_selection("reasoning", tiers["reasoning"], providers)
+        if reasoning_model:
+            reasoning_failovers = prompt_failover_models("reasoning", tiers["reasoning"], reasoning_model)
 
     # Free (optional)
     free_model = None
+    free_failovers: List[str] = []
     if tiers["free"]:
         free_model = prompt_model_selection("free", tiers["free"], providers)
+        if free_model:
+            free_failovers = prompt_failover_models("free", tiers["free"], free_model)
 
     # Step 5: Write config + summary
     click.echo("-" * 56)
@@ -959,9 +1039,23 @@ def run_setup_wizard(reconfigure: bool = False):
         complex_model=complex_model,
         reasoning=reasoning_model,
         free=free_model,
+        simple_failovers=simple_failovers,
+        complex_failovers=complex_failovers,
+        reasoning_failovers=reasoning_failovers,
+        free_failovers=free_failovers,
         api_keys=api_keys,
         ollama_api_base=ollama_api_base,
     )
     click.echo(f"  Wrote {env_path}")
 
-    print_summary(providers, simple_model, complex_model, reasoning_model, free_model)
+    print_summary(
+        providers,
+        simple_model,
+        complex_model,
+        reasoning_model,
+        free_model,
+        simple_failovers=simple_failovers,
+        complex_failovers=complex_failovers,
+        reasoning_failovers=reasoning_failovers,
+        free_failovers=free_failovers,
+    )
