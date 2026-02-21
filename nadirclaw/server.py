@@ -9,10 +9,12 @@ import asyncio
 import collections
 import json
 import logging
+import os
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+from pathlib import Path
 from threading import Lock
 from typing import Any, Dict, List, Optional, Union
 
@@ -160,6 +162,35 @@ class ClassifyBatchRequest(BaseModel):
     prompts: List[str]
 
 
+class SetupWebhookRequest(BaseModel):
+    """Webhook payload for setup-related runtime configuration."""
+
+    ollama_api_base: Optional[str] = None
+    fetch_models: bool = True
+    env: Optional[Dict[str, Any]] = None
+
+
+_SETUP_WEBHOOK_FIELD_TO_ENV = {
+    "nadirclaw_simple_model": "NADIRCLAW_SIMPLE_MODEL",
+    "nadirclaw_complex_model": "NADIRCLAW_COMPLEX_MODEL",
+    "nadirclaw_reasoning_model": "NADIRCLAW_REASONING_MODEL",
+    "nadirclaw_free_model": "NADIRCLAW_FREE_MODEL",
+    "nadirclaw_auth_token": "NADIRCLAW_AUTH_TOKEN",
+    "gemini_api_key": "GEMINI_API_KEY",
+    "anthropic_api_key": "ANTHROPIC_API_KEY",
+    "openai_api_key": "OPENAI_API_KEY",
+    "ollama_api_base": "OLLAMA_API_BASE",
+    "nadirclaw_confidence_threshold": "NADIRCLAW_CONFIDENCE_THRESHOLD",
+    "nadirclaw_port": "NADIRCLAW_PORT",
+    "nadirclaw_log_dir": "NADIRCLAW_LOG_DIR",
+    "nadirclaw_log_raw": "NADIRCLAW_LOG_RAW",
+    "nadirclaw_models": "NADIRCLAW_MODELS",
+    "otel_exporter_otlp_endpoint": "OTEL_EXPORTER_OTLP_ENDPOINT",
+}
+
+_SETUP_WEBHOOK_ALLOWED_VARS = set(_SETUP_WEBHOOK_FIELD_TO_ENV.values())
+
+
 # ---------------------------------------------------------------------------
 # Logging helper
 # ---------------------------------------------------------------------------
@@ -218,6 +249,33 @@ def _extract_request_metadata(request: ChatCompletionRequest) -> Dict[str, Any]:
         "tool_count": tool_count,
         "requested_model": request.model,
     }
+
+
+def _upsert_nadirclaw_env_var(key: str, value: str) -> Path:
+    """Upsert a key/value in ~/.nadirclaw/.env and return its path."""
+    config_dir = Path.home() / ".nadirclaw"
+    env_path = config_dir / ".env"
+    config_dir.mkdir(parents=True, exist_ok=True)
+
+    lines: List[str] = []
+    if env_path.exists():
+        lines = env_path.read_text().splitlines()
+
+    new_line = f"{key}={value}"
+    replaced = False
+    for i, line in enumerate(lines):
+        if line.strip().startswith(f"{key}="):
+            lines[i] = new_line
+            replaced = True
+            break
+
+    if not replaced:
+        if lines and lines[-1].strip() != "":
+            lines.append("")
+        lines.append(new_line)
+
+    env_path.write_text("\n".join(lines) + "\n")
+    return env_path
 
 
 # ---------------------------------------------------------------------------
@@ -1074,6 +1132,70 @@ def _build_streaming_response(
 # ---------------------------------------------------------------------------
 # /v1/logs — view request logs
 # ---------------------------------------------------------------------------
+
+
+@app.post("/v1/setup/webhook")
+async def setup_webhook(
+    payload: SetupWebhookRequest,
+    current_user: UserSession = Depends(validate_local_auth),
+) -> Dict[str, Any]:
+    """Apply setup-related env config from webhook and return Ollama discovery."""
+    from nadirclaw.setup import fetch_provider_models, _normalize_ollama_api_base
+
+    _ = current_user  # endpoint is auth-protected; user object intentionally unused
+
+    requested_env = payload.env or {}
+    env_updates: Dict[str, str] = {}
+    ignored_vars: List[str] = []
+
+    for key, raw_value in requested_env.items():
+        raw_key = str(key)
+        key_lower = raw_key.lower()
+
+        env_key: Optional[str] = None
+        if key_lower in _SETUP_WEBHOOK_FIELD_TO_ENV:
+            env_key = _SETUP_WEBHOOK_FIELD_TO_ENV[key_lower]
+        elif raw_key in _SETUP_WEBHOOK_ALLOWED_VARS:
+            # Backward compatibility for older clients using uppercase env var names.
+            env_key = raw_key
+
+        if not env_key:
+            ignored_vars.append(raw_key)
+            continue
+        if raw_value is None:
+            continue
+        if isinstance(raw_value, bool):
+            env_updates[env_key] = "true" if raw_value else "false"
+        else:
+            env_updates[env_key] = str(raw_value)
+
+    # Backward-compatible top-level field still supported.
+    if payload.ollama_api_base:
+        env_updates["OLLAMA_API_BASE"] = payload.ollama_api_base
+
+    base = _normalize_ollama_api_base(
+        env_updates.get("OLLAMA_API_BASE", settings.OLLAMA_API_BASE)
+    )
+    env_updates["OLLAMA_API_BASE"] = base
+
+    env_path: Optional[Path] = None
+    for key, value in env_updates.items():
+        os.environ[key] = value
+        env_path = _upsert_nadirclaw_env_var(key, value)
+
+    models: List[str] = []
+    if payload.fetch_models:
+        models = fetch_provider_models("ollama", "", ollama_api_base=base)
+
+    return {
+        "status": "ok",
+        "ollama_api_base": base,
+        "env_file": str(env_path) if env_path else str(Path.home() / ".nadirclaw" / ".env"),
+        "updated": env_updates,
+        "ignored": ignored_vars,
+        "models": models,
+        "model_count": len(models),
+    }
 
 @app.get("/v1/logs")
 async def view_logs(
