@@ -107,6 +107,10 @@ class Settings:
         return float(os.getenv("NADIRCLAW_CONFIDENCE_THRESHOLD", "0.06"))
 
     @property
+    def HOST(self) -> str:
+        return os.getenv("NADIRCLAW_HOST", "0.0.0.0")
+
+    @property
     def PORT(self) -> int:
         return int(os.getenv("NADIRCLAW_PORT", "8856"))
 
