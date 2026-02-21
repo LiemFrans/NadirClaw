@@ -204,6 +204,9 @@ def render_admin_settings(
         )
 
     default_ollama = escape(settings_obj.OLLAMA_API_BASE, quote=True)
+    current_models_csv = os.getenv("NADIRCLAW_MODELS", "")
+    current_models = [m.strip() for m in current_models_csv.split(",") if m.strip()]
+    current_models_json = json.dumps(current_models)
 
     html = f"""
     <!doctype html>
@@ -286,6 +289,21 @@ def render_admin_settings(
                 overflow: auto;
                 color: #d8e1ff;
             }}
+            .model-failover-wrap {{ display: flex; flex-direction: column; gap: 8px; }}
+            .model-row {{ display: flex; gap: 8px; align-items: center; }}
+            .model-row input {{ flex: 1; }}
+            .model-actions {{ display: flex; gap: 8px; }}
+            .mini-btn {{
+                padding: 8px 10px;
+                border-radius: 8px;
+                border: 1px solid var(--panel-border);
+                background: transparent;
+                color: var(--text);
+                cursor: pointer;
+                font-weight: 700;
+                line-height: 1;
+            }}
+            .mini-btn:hover {{ border-color: var(--primary); }}
             @media (max-width: 880px) {{ .grid {{ grid-template-columns: 1fr; }} }}
         </style>
     </head>
@@ -311,7 +329,17 @@ def render_admin_settings(
                             <div class=\"field\"><label>nadirclaw_complex_model</label><input name=\"nadirclaw_complex_model\" value=\"{current('NADIRCLAW_COMPLEX_MODEL')}\" placeholder=\"gpt-4.1\" /></div>
                             <div class=\"field\"><label>nadirclaw_reasoning_model</label><input name=\"nadirclaw_reasoning_model\" value=\"{current('NADIRCLAW_REASONING_MODEL')}\" placeholder=\"o3\" /></div>
                             <div class=\"field\"><label>nadirclaw_free_model</label><input name=\"nadirclaw_free_model\" value=\"{current('NADIRCLAW_FREE_MODEL')}\" placeholder=\"ollama/llama3.1:8b\" /></div>
-                            <div class=\"field\"><label>nadirclaw_models</label><input name=\"nadirclaw_models\" value=\"{current('NADIRCLAW_MODELS')}\" placeholder=\"comma-separated fallback list\" /></div>
+                            <div class=\"field\">
+                                <label>nadirclaw_models (failover order)</label>
+                                <div class=\"model-failover-wrap\">
+                                    <div id=\"failover-models\"></div>
+                                    <div class=\"model-actions\">
+                                        <button class=\"mini-btn\" type=\"button\" id=\"add-failover-model\" aria-label=\"Add failover model\">+</button>
+                                    </div>
+                                    <input type=\"hidden\" name=\"nadirclaw_models\" id=\"nadirclaw_models_hidden\" value=\"{current('NADIRCLAW_MODELS')}\" />
+                                    <span class=\"hint\">Add one model per row. Order is used for failover priority.</span>
+                                </div>
+                            </div>
                             <div class=\"field\"><label>nadirclaw_confidence_threshold</label><input name=\"nadirclaw_confidence_threshold\" value=\"{current('NADIRCLAW_CONFIDENCE_THRESHOLD')}\" placeholder=\"0.06\" /></div>
                         </div>
                     </div>
@@ -347,6 +375,53 @@ def render_admin_settings(
                 {result_html}
             </section>
         </main>
+        <script>
+            (function () {{
+                const initialModels = {current_models_json};
+                const container = document.getElementById("failover-models");
+                const addBtn = document.getElementById("add-failover-model");
+                const hidden = document.getElementById("nadirclaw_models_hidden");
+                const form = document.querySelector('form[action="/admin/settings"]');
+
+                function createRow(value) {{
+                    const row = document.createElement("div");
+                    row.className = "model-row";
+
+                    const input = document.createElement("input");
+                    input.type = "text";
+                    input.placeholder = "provider/model";
+                    input.value = value || "";
+                    input.className = "failover-model-item";
+
+                    const remove = document.createElement("button");
+                    remove.type = "button";
+                    remove.className = "mini-btn";
+                    remove.textContent = "−";
+                    remove.setAttribute("aria-label", "Remove failover model");
+                    remove.addEventListener("click", function () {{
+                        row.remove();
+                    }});
+
+                    row.appendChild(input);
+                    row.appendChild(remove);
+                    container.appendChild(row);
+                }}
+
+                addBtn.addEventListener("click", function () {{
+                    createRow("");
+                }});
+
+                const seed = initialModels.length ? initialModels : [""];
+                seed.forEach(function (m) {{ createRow(m); }});
+
+                form.addEventListener("submit", function () {{
+                    const values = Array.from(container.querySelectorAll(".failover-model-item"))
+                        .map((el) => el.value.trim())
+                        .filter(Boolean);
+                    hidden.value = values.join(",");
+                }});
+            }})();
+        </script>
     </body>
     </html>
     """
