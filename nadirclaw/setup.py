@@ -787,8 +787,7 @@ def write_env_file(
         lines.append("")
 
     if ollama_api_base:
-        if not api_keys:
-            lines.append("# API Keys")
+        lines.append("# Ollama")
         lines.append(f"OLLAMA_API_BASE={_normalize_ollama_api_base(ollama_api_base)}")
         lines.append("")
 
