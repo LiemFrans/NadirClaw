@@ -11,6 +11,7 @@ from click.testing import CliRunner
 
 from nadirclaw.setup import (
     ENV_FILE,
+    _check_ollama_connectivity_with_base,
     _filter_anthropic_top,
     _filter_google_top,
     _filter_openai_top,
@@ -138,6 +139,44 @@ class TestNormalizeOllamaApiBase:
 
     def test_custom_host_and_port(self):
         assert _normalize_ollama_api_base("http://192.168.1.10:11434") == "http://192.168.1.10:11434"
+
+
+# ---------------------------------------------------------------------------
+# _check_ollama_connectivity_with_base
+# ---------------------------------------------------------------------------
+
+class TestCheckOllamaConnectivityWithBase:
+    def test_returns_true_when_ollama_responds(self, monkeypatch):
+        """Should return True when the /api/tags endpoint is reachable."""
+        mock_resp = MagicMock()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        monkeypatch.setattr("urllib.request.urlopen", lambda *a, **k: mock_resp)
+        assert _check_ollama_connectivity_with_base("http://localhost:11434") is True
+
+    def test_returns_false_when_ollama_unreachable(self, monkeypatch):
+        """Should return False when the connection fails."""
+        monkeypatch.setattr(
+            "urllib.request.urlopen",
+            lambda *a, **k: (_ for _ in ()).throw(OSError("connection refused")),
+        )
+        assert _check_ollama_connectivity_with_base("http://localhost:11434") is False
+
+    def test_normalizes_base_url(self, monkeypatch):
+        """Should normalize the base URL before connecting."""
+        captured_urls = []
+
+        mock_resp = MagicMock()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+
+        def fake_urlopen(req, *args, **kwargs):
+            captured_urls.append(req.full_url)
+            return mock_resp
+
+        monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+        _check_ollama_connectivity_with_base("myhost:11434/")
+        assert captured_urls[0] == "http://myhost:11434/api/tags"
 
 
 # ---------------------------------------------------------------------------
@@ -527,6 +566,23 @@ class TestWriteEnvFile:
         write_env_file(simple="flash", complex_model="gpt-4.1")
         content = fake_env.read_text()
         assert "OLLAMA_API_BASE" not in content
+
+    def test_api_keys_and_ollama_api_base_coexist(self, tmp_nadirclaw_dir):
+        """Both api_keys and ollama_api_base sections should appear in output."""
+        _, fake_env = tmp_nadirclaw_dir
+        write_env_file(
+            simple="ollama/llama3.1:8b",
+            complex_model="gpt-4.1",
+            api_keys={"OPENAI_API_KEY": "sk-test-123"},
+            ollama_api_base="http://localhost:11434",
+        )
+        content = fake_env.read_text()
+        assert "# API Keys" in content
+        assert "OPENAI_API_KEY=sk-test-123" in content
+        assert "# Ollama" in content
+        assert "OLLAMA_API_BASE=http://localhost:11434" in content
+        # API Keys section must come before Ollama section
+        assert content.index("# API Keys") < content.index("# Ollama")
 
 
 # ---------------------------------------------------------------------------
