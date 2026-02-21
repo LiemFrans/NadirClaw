@@ -191,9 +191,50 @@ def render_admin_settings(
     settings_obj: Any,
 ) -> HTMLResponse:
     """Render admin settings dashboard page."""
+    def provider_for_model(model_name: str) -> str:
+        m = (model_name or "").strip().lower()
+        if not m:
+            return "other"
+        if "/" in m:
+            return m.split("/", 1)[0]
+        if m.startswith(("gpt", "o1", "o3", "o4")):
+            return "openai"
+        if m.startswith("claude"):
+            return "anthropic"
+        if m.startswith("gemini"):
+            return "google"
+        if m.startswith("deepseek"):
+            return "deepseek"
+        return "other"
 
     def current(env_var: str) -> str:
         return escape(os.getenv(env_var, ""), quote=True)
+
+    def split_model_for_admin(model_name: str) -> tuple[str, str]:
+        """Split full model into (provider, model_without_prefix) for form UI."""
+        m = (model_name or "").strip()
+        if not m:
+            return "openai", ""
+        if "/" in m:
+            provider, rest = m.split("/", 1)
+            return provider.lower(), rest
+        return provider_for_model(m), m
+
+    def provider_options_html(selected: str) -> str:
+        providers = [
+            "ollama",
+            "google",
+            "openai",
+            "anthropic",
+            "deepseek",
+            "openai-codex",
+            "custom",
+        ]
+        selected_norm = (selected or "custom").lower()
+        return "".join(
+            f'<option value="{p}"{" selected" if p == selected_norm else ""}>{p}</option>'
+            for p in providers
+        )
 
     result_html = ""
     if result is not None:
@@ -205,12 +246,22 @@ def render_admin_settings(
 
     default_ollama = escape(settings_obj.OLLAMA_API_BASE, quote=True)
 
+    simple_full = os.getenv("NADIRCLAW_SIMPLE_MODEL", "") or settings_obj.SIMPLE_MODEL
+    complex_full = os.getenv("NADIRCLAW_COMPLEX_MODEL", "") or settings_obj.COMPLEX_MODEL
+    reasoning_full = os.getenv("NADIRCLAW_REASONING_MODEL", "") or settings_obj.REASONING_MODEL
+    free_full = os.getenv("NADIRCLAW_FREE_MODEL", "") or settings_obj.FREE_MODEL
+
+    simple_provider, simple_name = split_model_for_admin(simple_full)
+    complex_provider, complex_name = split_model_for_admin(complex_full)
+    reasoning_provider, reasoning_name = split_model_for_admin(reasoning_full)
+    free_provider, free_name = split_model_for_admin(free_full)
+
     html = f"""
     <!doctype html>
     <html lang="en">
     <head>
-        <meta charset=\"utf-8\" />
-        <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
         <title>NadirClaw Admin Settings</title>
         <style>
             :root {{
@@ -247,14 +298,15 @@ def render_admin_settings(
             .field {{ display: flex; flex-direction: column; gap: 6px; }}
             label {{ font-weight: 600; }}
             .hint {{ font-size: 12px; color: var(--muted); }}
-            input {{
+            input, select {{
                 padding: 10px 11px;
                 border-radius: 10px;
                 border: 1px solid var(--panel-border);
                 background: #0f1730;
                 color: var(--text);
             }}
-            input:focus {{ outline: 2px solid rgba(79, 140, 255, 0.35); border-color: var(--primary); }}
+            input:focus, select:focus {{ outline: 2px solid rgba(79, 140, 255, 0.35); border-color: var(--primary); }}
+            .model-pair {{ display: grid; grid-template-columns: 180px 1fr; gap: 8px; }}
             .actions {{ margin-top: 16px; display:flex; gap:10px; flex-wrap:wrap; align-items:center; }}
             button {{
                 border: 0;
@@ -298,48 +350,49 @@ def render_admin_settings(
                         <p class="subtitle">Configure routing, auth, providers, logging, and telemetry.</p>
                         <span class="chip">Leave key/token fields empty to keep current secrets</span>
                     </div>
-                    <form method=\"post\" action=\"/admin/logout\">
-                        <button class="button-secondary" type=\"submit\">Logout</button>
+                    <form method="post" action="/admin/logout">
+                        <button class="button-secondary" type="submit">Logout</button>
                     </form>
                 </div>
 
-                <form method=\"post\" action=\"/admin/settings\">
+                <form method="post" action="/admin/settings">
                     <div class="section">
                         <h2>Routing Models</h2>
-                        <div class=\"grid\">
-                            <div class=\"field\"><label>nadirclaw_simple_model</label><input name=\"nadirclaw_simple_model\" value=\"{current('NADIRCLAW_SIMPLE_MODEL')}\" placeholder=\"gemini-2.5-flash\" /></div>
-                            <div class=\"field\"><label>nadirclaw_complex_model</label><input name=\"nadirclaw_complex_model\" value=\"{current('NADIRCLAW_COMPLEX_MODEL')}\" placeholder=\"gpt-4.1\" /></div>
-                            <div class=\"field\"><label>nadirclaw_reasoning_model</label><input name=\"nadirclaw_reasoning_model\" value=\"{current('NADIRCLAW_REASONING_MODEL')}\" placeholder=\"o3\" /></div>
-                            <div class=\"field\"><label>nadirclaw_free_model</label><input name=\"nadirclaw_free_model\" value=\"{current('NADIRCLAW_FREE_MODEL')}\" placeholder=\"ollama/llama3.1:8b\" /></div>
-                            <div class=\"field\"><label>nadirclaw_models</label><input name=\"nadirclaw_models\" value=\"{current('NADIRCLAW_MODELS')}\" placeholder=\"comma-separated fallback list\" /></div>
-                            <div class=\"field\"><label>nadirclaw_confidence_threshold</label><input name=\"nadirclaw_confidence_threshold\" value=\"{current('NADIRCLAW_CONFIDENCE_THRESHOLD')}\" placeholder=\"0.06\" /></div>
+                        <p class="hint">Choose provider in combobox, then type model name without provider prefix.</p>
+                        <div class="grid">
+                            <div class="field"><label>nadirclaw_simple_model</label><div class="model-pair"><select name="nadirclaw_simple_model_provider">{provider_options_html(simple_provider)}</select><input name="nadirclaw_simple_model" value="{escape(simple_name, quote=True)}" placeholder="llama3.1:8b" /></div></div>
+                            <div class="field"><label>nadirclaw_complex_model</label><div class="model-pair"><select name="nadirclaw_complex_model_provider">{provider_options_html(complex_provider)}</select><input name="nadirclaw_complex_model" value="{escape(complex_name, quote=True)}" placeholder="gpt-4.1" /></div></div>
+                            <div class="field"><label>nadirclaw_reasoning_model</label><div class="model-pair"><select name="nadirclaw_reasoning_model_provider">{provider_options_html(reasoning_provider)}</select><input name="nadirclaw_reasoning_model" value="{escape(reasoning_name, quote=True)}" placeholder="o3" /></div></div>
+                            <div class="field"><label>nadirclaw_free_model</label><div class="model-pair"><select name="nadirclaw_free_model_provider">{provider_options_html(free_provider)}</select><input name="nadirclaw_free_model" value="{escape(free_name, quote=True)}" placeholder="gpt-oss:14b" /></div></div>
+                            <div class="field"><label>nadirclaw_models</label><input name="nadirclaw_models" value="{current('NADIRCLAW_MODELS')}" placeholder="comma-separated fallback list" /></div>
+                            <div class="field"><label>nadirclaw_confidence_threshold</label><input name="nadirclaw_confidence_threshold" value="{current('NADIRCLAW_CONFIDENCE_THRESHOLD')}" placeholder="0.06" /></div>
                         </div>
                     </div>
 
                     <div class="section">
                         <h2>Providers & Authentication</h2>
-                        <div class=\"grid\">
-                            <div class=\"field\"><label>ollama_api_base</label><input name=\"ollama_api_base\" value=\"{current('OLLAMA_API_BASE') or default_ollama}\" placeholder=\"http://localhost:11434\" /></div>
-                            <div class=\"field\"><label>nadirclaw_auth_token</label><input type=\"password\" name=\"nadirclaw_auth_token\" placeholder=\"unchanged unless provided\" /></div>
-                            <div class=\"field\"><label>gemini_api_key</label><input type=\"password\" name=\"gemini_api_key\" placeholder=\"unchanged unless provided\" /></div>
-                            <div class=\"field\"><label>anthropic_api_key</label><input type=\"password\" name=\"anthropic_api_key\" placeholder=\"unchanged unless provided\" /></div>
-                            <div class=\"field\"><label>openai_api_key</label><input type=\"password\" name=\"openai_api_key\" placeholder=\"unchanged unless provided\" /></div>
+                        <div class="grid">
+                            <div class="field"><label>ollama_api_base</label><input name="ollama_api_base" value="{current('OLLAMA_API_BASE') or default_ollama}" placeholder="http://localhost:11434" /></div>
+                            <div class="field"><label>nadirclaw_auth_token</label><input type="password" name="nadirclaw_auth_token" placeholder="unchanged unless provided" /></div>
+                            <div class="field"><label>gemini_api_key</label><input type="password" name="gemini_api_key" placeholder="unchanged unless provided" /></div>
+                            <div class="field"><label>anthropic_api_key</label><input type="password" name="anthropic_api_key" placeholder="unchanged unless provided" /></div>
+                            <div class="field"><label>openai_api_key</label><input type="password" name="openai_api_key" placeholder="unchanged unless provided" /></div>
                         </div>
                     </div>
 
                     <div class="section">
                         <h2>Server & Observability</h2>
-                        <div class=\"grid\">
-                            <div class=\"field\"><label>nadirclaw_port</label><input name=\"nadirclaw_port\" value=\"{current('NADIRCLAW_PORT')}\" placeholder=\"8856\" /></div>
-                            <div class=\"field\"><label>nadirclaw_log_dir</label><input name=\"nadirclaw_log_dir\" value=\"{current('NADIRCLAW_LOG_DIR')}\" placeholder=\"~/.nadirclaw/logs\" /></div>
-                            <div class=\"field\"><label>nadirclaw_log_raw</label><input name=\"nadirclaw_log_raw\" value=\"{current('NADIRCLAW_LOG_RAW')}\" placeholder=\"true or false\" /></div>
-                            <div class=\"field\"><label>otel_exporter_otlp_endpoint</label><input name=\"otel_exporter_otlp_endpoint\" value=\"{current('OTEL_EXPORTER_OTLP_ENDPOINT')}\" placeholder=\"http://localhost:4317\" /></div>
+                        <div class="grid">
+                            <div class="field"><label>nadirclaw_port</label><input name="nadirclaw_port" value="{current('NADIRCLAW_PORT')}" placeholder="8856" /></div>
+                            <div class="field"><label>nadirclaw_log_dir</label><input name="nadirclaw_log_dir" value="{current('NADIRCLAW_LOG_DIR')}" placeholder="~/.nadirclaw/logs" /></div>
+                            <div class="field"><label>nadirclaw_log_raw</label><input name="nadirclaw_log_raw" value="{current('NADIRCLAW_LOG_RAW')}" placeholder="true or false" /></div>
+                            <div class="field"><label>otel_exporter_otlp_endpoint</label><input name="otel_exporter_otlp_endpoint" value="{current('OTEL_EXPORTER_OTLP_ENDPOINT')}" placeholder="http://localhost:4317" /></div>
                         </div>
                     </div>
 
-                    <div class=\"actions\">
-                        <label><input type=\"checkbox\" name=\"fetch_models\" checked /> fetch_models</label>
-                        <button type=\"submit\">Save settings</button>
+                    <div class="actions">
+                        <label><input type="checkbox" name="fetch_models" checked /> fetch_models</label>
+                        <button type="submit">Save settings</button>
                         <span class="hint">Saves to <code>~/.nadirclaw/.env</code> and applies immediately.</span>
                     </div>
                 </form>

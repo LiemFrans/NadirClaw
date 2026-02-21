@@ -1358,8 +1358,50 @@ async def admin_update_settings(request: Request):
         return render_admin_login("Session expired. Please login again.")
 
     form = parse_form_body(await request.body())
+
+    def _compose_tier_model(provider: str, model_name: str) -> str:
+        """Compose full model id from provider combobox + model textbox."""
+        m = model_name.strip()
+        if not m:
+            return ""
+        if "/" in m:
+            return m
+
+        p = provider.strip().lower()
+        if not p or p in {"custom", "other", "auto"}:
+            return m
+
+        # Keep canonical no-prefix style for these providers.
+        if p in {"openai", "google", "anthropic"}:
+            return m
+
+        # Prefix style providers.
+        return f"{p}/{m}"
+
     env_payload: Dict[str, Any] = {}
+    model_tier_fields = {
+        "nadirclaw_simple_model",
+        "nadirclaw_complex_model",
+        "nadirclaw_reasoning_model",
+        "nadirclaw_free_model",
+    }
+
+    # Handle tier models from provider+model UI controls.
+    for field_name in model_tier_fields:
+        raw_model = form.get(field_name)
+        if raw_model is None:
+            continue
+        model_name = str(raw_model).strip()
+        if model_name == "":
+            continue
+        provider_name = str(form.get(f"{field_name}_provider", "")).strip()
+        composed = _compose_tier_model(provider_name, model_name)
+        if composed:
+            env_payload[field_name] = composed
+
     for field_name in _SETUP_WEBHOOK_FIELD_TO_ENV:
+        if field_name in model_tier_fields:
+            continue
         raw = form.get(field_name)
         if raw is None:
             continue
