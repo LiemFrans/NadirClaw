@@ -326,6 +326,9 @@ async def startup():
         litellm.set_verbose = False
         logger.info("Simple model:  %s", settings.SIMPLE_MODEL)
         logger.info("Complex model: %s", settings.COMPLEX_MODEL)
+        logger.info("Reasoning model: %s", settings.REASONING_MODEL)
+        logger.info("Free model:    %s", settings.FREE_MODEL)
+        logger.info("Confidence threshold: %s", settings.CONFIDENCE_THRESHOLD)
         if settings.has_explicit_tiers:
             logger.info("Tier config:   explicit (env vars)")
         else:
