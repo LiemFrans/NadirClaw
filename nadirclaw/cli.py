@@ -34,12 +34,6 @@ def _print_table(title, headers, rows):
     click.echo(_line())
 
 
-def _fmt_model_chain(models):
-    """Format ordered model list for display with primary + failovers."""
-    vals = [str(m).strip() for m in (models or []) if str(m).strip()]
-    return " -> ".join(vals) if vals else "-"
-
-
 def _fmt_failover_only(models):
     """Format only fallback candidates (exclude primary model at index 0)."""
     vals = [str(m).strip() for m in (models or []) if str(m).strip()]
