@@ -370,7 +370,7 @@ class SessionCache:
             self._cleanup_counter += 1
             if self._cleanup_counter >= self._cleanup_interval:
                 self._cleanup_counter = 0
-                self.clear_expired()
+                self._clear_expired()
 
             self._cache[key] = (model, tier, time.time())
             self._touch(key)
@@ -379,10 +379,10 @@ class SessionCache:
             if len(self._cache) > self._max_size:
                 self._evict_lru()
 
-    def clear_expired(self) -> int:
+    def _clear_expired(self) -> int:
         """Remove expired entries. Returns number removed.
 
-        Caller must hold self._lock.
+        Must be called while holding self._lock.
         """
         now = time.time()
         expired = [k for k, (_, _, ts) in self._cache.items() if now - ts > self._ttl]
