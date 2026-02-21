@@ -538,6 +538,23 @@ def render_admin_settings(
                             model: raw.slice(slash + 1).trim(),
                         }};
                     }}
+
+                    // Infer provider from common unprefixed model naming schemes.
+                    // This avoids mislabeling failover rows as the primary tier provider.
+                    const lower = raw.toLowerCase();
+                    if (lower.startsWith('gpt') || lower.startsWith('o1') || lower.startsWith('o3') || lower.startsWith('o4')) {{
+                        return {{ provider: 'openai', model: raw }};
+                    }}
+                    if (lower.startsWith('claude')) {{
+                        return {{ provider: 'anthropic', model: raw }};
+                    }}
+                    if (lower.startsWith('gemini')) {{
+                        return {{ provider: 'google', model: raw }};
+                    }}
+                    if (lower.startsWith('deepseek')) {{
+                        return {{ provider: 'deepseek', model: raw }};
+                    }}
+
                     return {{ provider: fallback, model: raw }};
                 }}
 
