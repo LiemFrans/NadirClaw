@@ -97,6 +97,17 @@ _TIER_DEFAULTS = {
 # Config directory
 CONFIG_DIR = Path.home() / ".nadirclaw"
 ENV_FILE = CONFIG_DIR / ".env"
+OLLAMA_DEFAULT_API_BASE = "http://localhost:11434"
+
+
+def _normalize_ollama_api_base(api_base: str) -> str:
+    """Normalize Ollama API base URL (fallback to localhost default)."""
+    value = (api_base or "").strip()
+    if not value:
+        value = OLLAMA_DEFAULT_API_BASE
+    if not re.match(r"^https?://", value, flags=re.IGNORECASE):
+        value = f"http://{value}"
+    return value.rstrip("/")
 
 
 # ---------------------------------------------------------------------------
@@ -243,9 +254,10 @@ def _fetch_deepseek_models(credential: str) -> List[str]:
     return sorted(models)
 
 
-def _fetch_ollama_models() -> List[str]:
+def _fetch_ollama_models(api_base: str = OLLAMA_DEFAULT_API_BASE) -> List[str]:
     """Fetch locally installed models from Ollama."""
-    req = urllib.request.Request("http://localhost:11434/api/tags")
+    base = _normalize_ollama_api_base(api_base)
+    req = urllib.request.Request(f"{base}/api/tags")
     try:
         with urllib.request.urlopen(req, timeout=3) as resp:
             data = json.loads(resp.read())
@@ -320,7 +332,11 @@ def _filter_google_top(models: List[str]) -> List[str]:
     return sorted(top)
 
 
-def fetch_provider_models(provider: str, credential: str) -> List[str]:
+def fetch_provider_models(
+    provider: str,
+    credential: str,
+    ollama_api_base: str = OLLAMA_DEFAULT_API_BASE,
+) -> List[str]:
     """Fetch available model IDs from a provider's API.
 
     Returns only top current-generation models, or empty list on failure.
@@ -332,7 +348,7 @@ def fetch_provider_models(provider: str, credential: str) -> List[str]:
         "deepseek": _fetch_deepseek_models,
     }
     if provider == "ollama":
-        return _fetch_ollama_models()
+        return _fetch_ollama_models(ollama_api_base)
     fetcher = fetchers.get(provider)
     if fetcher and credential:
         raw = fetcher(credential)
@@ -435,15 +451,25 @@ def prompt_provider_selection(existing: Optional[List[str]] = None) -> List[str]
 
 def _check_ollama_connectivity() -> bool:
     """Check if Ollama is running at localhost:11434."""
+    return _check_ollama_connectivity_with_base(OLLAMA_DEFAULT_API_BASE)
+
+
+def _check_ollama_connectivity_with_base(api_base: str) -> bool:
+    """Check if Ollama is running at a provided API base."""
+    base = _normalize_ollama_api_base(api_base)
     try:
-        req = urllib.request.Request("http://localhost:11434/api/tags")
+        req = urllib.request.Request(f"{base}/api/tags")
         with urllib.request.urlopen(req, timeout=3):
             return True
     except Exception:
         return False
 
 
-def prompt_credential_for_provider(provider: str, reconfigure: bool = False) -> Optional[str]:
+def prompt_credential_for_provider(
+    provider: str,
+    reconfigure: bool = False,
+    ollama_api_base: str = OLLAMA_DEFAULT_API_BASE,
+) -> Optional[str]:
     """Prompt user for credentials for a single provider.
 
     Returns the credential string, or None if skipped.
@@ -455,10 +481,11 @@ def prompt_credential_for_provider(provider: str, reconfigure: bool = False) -> 
     # Ollama needs no key
     if provider == "ollama":
         click.echo(f"  {info['display']}: Checking connectivity...")
-        if _check_ollama_connectivity():
-            click.echo("    Ollama is running at localhost:11434")
+        base = _normalize_ollama_api_base(ollama_api_base)
+        if _check_ollama_connectivity_with_base(base):
+            click.echo(f"    Ollama is running at {base}")
         else:
-            click.echo("    Ollama not detected at localhost:11434")
+            click.echo(f"    Ollama not detected at {base}")
             click.echo("    Make sure Ollama is running before using local models.")
         click.echo()
         return "local"
@@ -728,6 +755,7 @@ def write_env_file(
     reasoning: Optional[str] = None,
     free: Optional[str] = None,
     api_keys: Optional[Dict[str, str]] = None,
+    ollama_api_base: Optional[str] = None,
 ) -> Path:
     """Write ~/.nadirclaw/.env with model configuration.
 
@@ -756,6 +784,12 @@ def write_env_file(
         lines.append("# API Keys")
         for env_var, value in sorted(api_keys.items()):
             lines.append(f"{env_var}={value}")
+        lines.append("")
+
+    if ollama_api_base:
+        if not api_keys:
+            lines.append("# API Keys")
+        lines.append(f"OLLAMA_API_BASE={_normalize_ollama_api_base(ollama_api_base)}")
         lines.append("")
 
     # Model routing
@@ -828,6 +862,16 @@ def run_setup_wizard(reconfigure: bool = False):
     # Step 2: Provider selection
     providers = prompt_provider_selection(existing=existing_creds or None)
 
+    ollama_api_base = None
+    if "ollama" in providers:
+        ollama_api_base = click.prompt(
+            "OLLAMA_API_BASE",
+            default=OLLAMA_DEFAULT_API_BASE,
+            show_default=True,
+        )
+        ollama_api_base = _normalize_ollama_api_base(ollama_api_base)
+        click.echo()
+
     # Step 3: Credential collection
     click.echo("-" * 56)
     click.echo("  Credentials")
@@ -837,7 +881,11 @@ def run_setup_wizard(reconfigure: bool = False):
     api_keys: Dict[str, str] = {}
     collected_credentials: Dict[str, str] = {}
     for provider in providers:
-        cred = prompt_credential_for_provider(provider, reconfigure=reconfigure)
+        cred = prompt_credential_for_provider(
+            provider,
+            reconfigure=reconfigure,
+            ollama_api_base=ollama_api_base or OLLAMA_DEFAULT_API_BASE,
+        )
         if cred:
             collected_credentials[provider] = cred
             # Collect API keys for .env (only plain keys, not OAuth tokens)
@@ -859,7 +907,11 @@ def run_setup_wizard(reconfigure: bool = False):
         cred = collected_credentials.get(provider)
         display = PROVIDER_INFO[provider]["display"]
         click.echo(f"  {display}...", nl=False)
-        models = fetch_provider_models(provider, cred or "")
+        models = fetch_provider_models(
+            provider,
+            cred or "",
+            ollama_api_base=ollama_api_base or OLLAMA_DEFAULT_API_BASE,
+        )
         if models:
             fetched_models[provider] = models
             click.echo(f" {len(models)} models found")
@@ -909,6 +961,7 @@ def run_setup_wizard(reconfigure: bool = False):
         reasoning=reasoning_model,
         free=free_model,
         api_keys=api_keys,
+        ollama_api_base=ollama_api_base,
     )
     click.echo(f"  Wrote {env_path}")
 
