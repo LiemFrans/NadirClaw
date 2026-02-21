@@ -438,6 +438,7 @@ def render_admin_settings(
                             <div class="field"><label>gemini_api_key</label><div class="field-row"><input type="password" name="gemini_api_key" placeholder="unchanged unless provided" /><button type="button" class="button-secondary clear-secret-btn" data-clear-target="clear_gemini_api_key">Clear</button></div><input type="hidden" name="clear_gemini_api_key" value="0" /></div>
                             <div class="field"><label>anthropic_api_key</label><div class="field-row"><input type="password" name="anthropic_api_key" placeholder="unchanged unless provided" /><button type="button" class="button-secondary clear-secret-btn" data-clear-target="clear_anthropic_api_key">Clear</button></div><input type="hidden" name="clear_anthropic_api_key" value="0" /></div>
                             <div class="field"><label>openai_api_key</label><div class="field-row"><input type="password" name="openai_api_key" placeholder="unchanged unless provided" /><button type="button" class="button-secondary clear-secret-btn" data-clear-target="clear_openai_api_key">Clear</button></div><input type="hidden" name="clear_openai_api_key" value="0" /></div>
+                            <div class="field"><label>deepseek_api_key</label><div class="field-row"><input type="password" name="deepseek_api_key" placeholder="unchanged unless provided" /><button type="button" class="button-secondary clear-secret-btn" data-clear-target="clear_deepseek_api_key">Clear</button></div><input type="hidden" name="clear_deepseek_api_key" value="0" /></div>
                         </div>
                     </div>
 
@@ -480,6 +481,7 @@ def render_admin_settings(
                             'openai-codex': 'openai_api_key',
                             anthropic: 'anthropic_api_key',
                             google: 'gemini_api_key',
+                            deepseek: 'deepseek_api_key',
                         }};
                         const fieldName = keyByProvider[p] || '';
                         if (!fieldName) return '';

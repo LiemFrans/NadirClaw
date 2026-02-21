@@ -198,6 +198,7 @@ _SETUP_WEBHOOK_FIELD_TO_ENV = {
     "gemini_api_key": "GEMINI_API_KEY",
     "anthropic_api_key": "ANTHROPIC_API_KEY",
     "openai_api_key": "OPENAI_API_KEY",
+    "deepseek_api_key": "DEEPSEEK_API_KEY",
     "ollama_api_base": "OLLAMA_API_BASE",
     "nadirclaw_confidence_threshold": "NADIRCLAW_CONFIDENCE_THRESHOLD",
     "nadirclaw_port": "NADIRCLAW_PORT",
@@ -1507,6 +1508,7 @@ async def admin_update_settings(request: Request):
         "clear_gemini_api_key": "GEMINI_API_KEY",
         "clear_anthropic_api_key": "ANTHROPIC_API_KEY",
         "clear_openai_api_key": "OPENAI_API_KEY",
+        "clear_deepseek_api_key": "DEEPSEEK_API_KEY",
     }
     cleared_env_keys: List[str] = []
     for clear_field, env_key in clear_secret_map.items():
