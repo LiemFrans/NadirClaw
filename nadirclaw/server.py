@@ -20,11 +20,22 @@ from typing import Any, Dict, List, Optional, Union
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
 from nadirclaw import __version__
+from nadirclaw.admin_ui import (
+    admin_session_cookie_name,
+    admin_session_ttl_seconds,
+    create_admin_session,
+    get_admin_password,
+    is_admin_authenticated,
+    parse_form_body,
+    pop_admin_session,
+    render_admin_login,
+    render_admin_settings,
+)
 from nadirclaw.auth import UserSession, validate_local_auth
 from nadirclaw.settings import settings
 
@@ -1140,9 +1151,13 @@ async def setup_webhook(
     current_user: UserSession = Depends(validate_local_auth),
 ) -> Dict[str, Any]:
     """Apply setup-related env config from webhook and return Ollama discovery."""
-    from nadirclaw.setup import fetch_provider_models, _normalize_ollama_api_base
-
     _ = current_user  # endpoint is auth-protected; user object intentionally unused
+    return _apply_setup_updates(payload)
+
+
+def _apply_setup_updates(payload: SetupWebhookRequest) -> Dict[str, Any]:
+    """Apply setup/env updates and optionally fetch Ollama models."""
+    from nadirclaw.setup import fetch_provider_models, _normalize_ollama_api_base
 
     requested_env = payload.env or {}
     env_updates: Dict[str, str] = {}
@@ -1196,6 +1211,78 @@ async def setup_webhook(
         "models": models,
         "model_count": len(models),
     }
+
+
+@app.get("/admin")
+async def admin_settings_page(request: Request):
+    """Admin UI for setup webhook-backed settings."""
+    if not is_admin_authenticated(request):
+        return render_admin_login()
+    return render_admin_settings(result=None, settings_obj=settings)
+
+
+@app.post("/admin/login")
+async def admin_login(request: Request):
+    """Login endpoint for admin settings UI."""
+    form = parse_form_body(await request.body())
+    password = form.get("password", "")
+
+    admin_password = get_admin_password(settings.AUTH_TOKEN)
+    if not admin_password:
+        return render_admin_login(
+            "Admin login is not configured. Set NADIRCLAW_ADMIN_PASSWORD or NADIRCLAW_AUTH_TOKEN."
+        )
+
+    if password != admin_password:
+        return render_admin_login("Invalid password.")
+
+    token = create_admin_session()
+    resp = RedirectResponse(url="/admin", status_code=303)
+    resp.set_cookie(
+        key=admin_session_cookie_name(),
+        value=token,
+        httponly=True,
+        samesite="lax",
+        max_age=admin_session_ttl_seconds(),
+    )
+    return resp
+
+
+@app.post("/admin/logout")
+async def admin_logout(request: Request):
+    """Logout endpoint for admin settings UI."""
+    token = request.cookies.get(admin_session_cookie_name(), "")
+    pop_admin_session(token)
+
+    resp = RedirectResponse(url="/admin", status_code=303)
+    resp.delete_cookie(admin_session_cookie_name())
+    return resp
+
+
+@app.post("/admin/settings")
+async def admin_update_settings(request: Request):
+    """Apply settings from admin UI via the same logic as setup webhook."""
+    if not is_admin_authenticated(request):
+        return render_admin_login("Session expired. Please login again.")
+
+    form = parse_form_body(await request.body())
+    env_payload: Dict[str, Any] = {}
+    for field_name in _SETUP_WEBHOOK_FIELD_TO_ENV:
+        raw = form.get(field_name)
+        if raw is None:
+            continue
+        value = str(raw).strip()
+        if value == "":
+            continue
+        env_payload[field_name] = value
+
+    payload = SetupWebhookRequest(
+        ollama_api_base=str(form.get("ollama_api_base", "")).strip() or None,
+        fetch_models=form.get("fetch_models") == "on",
+        env=env_payload,
+    )
+    result = _apply_setup_updates(payload)
+    return render_admin_settings(result=result, settings_obj=settings)
 
 @app.get("/v1/logs")
 async def view_logs(
