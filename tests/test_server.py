@@ -1,5 +1,7 @@
 """Tests for nadirclaw.server — health endpoint and basic API contract."""
 
+from unittest.mock import MagicMock
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -63,3 +65,88 @@ class TestClassifyEndpoint:
         data = resp.json()
         assert data["total"] == 2
         assert len(data["results"]) == 2
+
+
+class TestSetupWebhookEndpoint:
+    def test_setup_webhook_updates_ollama_base_and_fetches_models(self, client, monkeypatch):
+        upsert = MagicMock()
+        monkeypatch.setattr("nadirclaw.server._upsert_nadirclaw_env_var", upsert)
+
+        monkeypatch.setattr(
+            "nadirclaw.setup.fetch_provider_models",
+            lambda provider, credential, ollama_api_base="": ["ollama/llama3.2:3b"]
+            if provider == "ollama"
+            else [],
+        )
+
+        resp = client.post(
+            "/v1/setup/webhook",
+            json={"ollama_api_base": "10.4.136.145:11434", "fetch_models": True},
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "ok"
+        assert data["ollama_api_base"] == "http://10.4.136.145:11434"
+        assert data["models"] == ["ollama/llama3.2:3b"]
+        assert data["model_count"] == 1
+        upsert.assert_called_once_with("OLLAMA_API_BASE", "http://10.4.136.145:11434")
+
+    def test_setup_webhook_can_skip_model_fetch(self, client, monkeypatch):
+        upsert = MagicMock()
+        monkeypatch.setattr("nadirclaw.server._upsert_nadirclaw_env_var", upsert)
+
+        called = {"count": 0}
+
+        def _fake_fetch(provider, credential, ollama_api_base=""):
+            called["count"] += 1
+            return ["ollama/llama3.2:3b"]
+
+        monkeypatch.setattr("nadirclaw.setup.fetch_provider_models", _fake_fetch)
+
+        resp = client.post(
+            "/v1/setup/webhook",
+            json={"ollama_api_base": "http://localhost:11434", "fetch_models": False},
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "ok"
+        assert data["models"] == []
+        assert data["model_count"] == 0
+        assert called["count"] == 0
+        upsert.assert_called_once_with("OLLAMA_API_BASE", "http://localhost:11434")
+
+    def test_setup_webhook_updates_env_map_and_ignores_unknown_keys(self, client, monkeypatch):
+        upsert = MagicMock()
+        monkeypatch.setattr("nadirclaw.server._upsert_nadirclaw_env_var", upsert)
+
+        resp = client.post(
+            "/v1/setup/webhook",
+            json={
+                "env": {
+                    "nadirclaw_simple_model": "gemini-2.5-flash",
+                    "nadirclaw_complex_model": "gpt-4.1",
+                    "nadirclaw_log_raw": True,
+                    "UNKNOWN_KEY": "ignored",
+                },
+                "fetch_models": False,
+            },
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "ok"
+        assert data["updated"]["NADIRCLAW_SIMPLE_MODEL"] == "gemini-2.5-flash"
+        assert data["updated"]["NADIRCLAW_COMPLEX_MODEL"] == "gpt-4.1"
+        assert data["updated"]["NADIRCLAW_LOG_RAW"] == "true"
+        assert "UNKNOWN_KEY" in data["ignored"]
+
+        expected_calls = {
+            ("NADIRCLAW_SIMPLE_MODEL", "gemini-2.5-flash"),
+            ("NADIRCLAW_COMPLEX_MODEL", "gpt-4.1"),
+            ("NADIRCLAW_LOG_RAW", "true"),
+            ("OLLAMA_API_BASE", "http://localhost:11434"),
+        }
+        actual_calls = {(c.args[0], c.args[1]) for c in upsert.call_args_list}
+        assert expected_calls.issubset(actual_calls)

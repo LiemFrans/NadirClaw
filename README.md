@@ -652,6 +652,7 @@ Auth is disabled by default (local-only). Set `NADIRCLAW_AUTH_TOKEN` to require 
 | `/v1/classify/batch` | POST | Classify multiple prompts at once |
 | `/v1/models` | GET | List available models |
 | `/v1/logs` | GET | View recent request logs |
+| `/v1/setup/webhook` | POST | Set `OLLAMA_API_BASE`, persist to `.env`, and optionally fetch Ollama models ([docs](docs/setup-webhook.md)) |
 | `/health` | GET | Health check (no auth required) |
 
 ## Configuration Reference
