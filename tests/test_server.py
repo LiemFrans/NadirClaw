@@ -204,3 +204,28 @@ class TestAdminWebUI:
         assert resp.status_code == 200
         assert "Last update result" in resp.text
         assert "gemini-2.5-flash" in resp.text
+
+
+class TestTierFailoverPools:
+    def test_build_failover_candidates_prefers_same_tier_then_cross_tier(self, monkeypatch):
+        monkeypatch.setenv("NADIRCLAW_SIMPLE_MODEL", "simple-a,simple-b")
+        monkeypatch.setenv("NADIRCLAW_COMPLEX_MODEL", "complex-a,complex-b")
+
+        from nadirclaw.server import _build_failover_candidates
+
+        candidates = _build_failover_candidates("simple-a", "simple")
+        assert candidates[0] == "simple-a"
+        assert candidates[1] == "simple-b"
+        assert "complex-a" in candidates
+        assert "complex-b" in candidates
+
+    def test_build_failover_candidates_reasoning_includes_reasoning_then_complex(self, monkeypatch):
+        monkeypatch.setenv("NADIRCLAW_REASONING_MODEL", "o3,o4-mini")
+        monkeypatch.setenv("NADIRCLAW_COMPLEX_MODEL", "gpt-4.1")
+
+        from nadirclaw.server import _build_failover_candidates
+
+        candidates = _build_failover_candidates("o3", "reasoning")
+        assert candidates[0] == "o3"
+        assert candidates[1] == "o4-mini"
+        assert "gpt-4.1" in candidates

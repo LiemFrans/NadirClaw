@@ -18,6 +18,11 @@ else:
 class Settings:
     """All configuration from environment variables."""
 
+    @staticmethod
+    def _parse_model_list(raw: str) -> list[str]:
+        """Parse comma-separated model list, trimming whitespace."""
+        return [m.strip() for m in raw.split(",") if m.strip()]
+
     @property
     def AUTH_TOKEN(self) -> str:
         return os.getenv("NADIRCLAW_AUTH_TOKEN", "")
@@ -25,20 +30,32 @@ class Settings:
     @property
     def SIMPLE_MODEL(self) -> str:
         """Model for simple prompts. Falls back to last model in MODELS list."""
+        return self.SIMPLE_MODELS[0]
+
+    @property
+    def SIMPLE_MODELS(self) -> list[str]:
+        """Priority-ordered simple models (comma-separated env supported)."""
         explicit = os.getenv("NADIRCLAW_SIMPLE_MODEL", "")
-        if explicit:
-            return explicit
+        parsed = self._parse_model_list(explicit)
+        if parsed:
+            return parsed
         models = self.MODELS
-        return models[-1] if models else "gemini-3-flash-preview"
+        return [models[-1]] if models else ["gemini-3-flash-preview"]
 
     @property
     def COMPLEX_MODEL(self) -> str:
         """Model for complex prompts. Falls back to first model in MODELS list."""
+        return self.COMPLEX_MODELS[0]
+
+    @property
+    def COMPLEX_MODELS(self) -> list[str]:
+        """Priority-ordered complex models (comma-separated env supported)."""
         explicit = os.getenv("NADIRCLAW_COMPLEX_MODEL", "")
-        if explicit:
-            return explicit
+        parsed = self._parse_model_list(explicit)
+        if parsed:
+            return parsed
         models = self.MODELS
-        return models[0] if models else "openai-codex/gpt-5.3-codex"
+        return [models[0]] if models else ["openai-codex/gpt-5.3-codex"]
 
     @property
     def MODELS(self) -> list[str]:
@@ -88,12 +105,30 @@ class Settings:
     @property
     def REASONING_MODEL(self) -> str:
         """Model for reasoning tasks. Falls back to COMPLEX_MODEL."""
-        return os.getenv("NADIRCLAW_REASONING_MODEL", "") or self.COMPLEX_MODEL
+        return self.REASONING_MODELS[0]
+
+    @property
+    def REASONING_MODELS(self) -> list[str]:
+        """Priority-ordered reasoning models (comma-separated env supported)."""
+        explicit = os.getenv("NADIRCLAW_REASONING_MODEL", "")
+        parsed = self._parse_model_list(explicit)
+        if parsed:
+            return parsed
+        return list(self.COMPLEX_MODELS)
 
     @property
     def FREE_MODEL(self) -> str:
         """Free fallback model. Falls back to SIMPLE_MODEL."""
-        return os.getenv("NADIRCLAW_FREE_MODEL", "") or self.SIMPLE_MODEL
+        return self.FREE_MODELS[0]
+
+    @property
+    def FREE_MODELS(self) -> list[str]:
+        """Priority-ordered free models (comma-separated env supported)."""
+        explicit = os.getenv("NADIRCLAW_FREE_MODEL", "")
+        parsed = self._parse_model_list(explicit)
+        if parsed:
+            return parsed
+        return list(self.SIMPLE_MODELS)
 
     @property
     def has_explicit_tiers(self) -> bool:
@@ -104,11 +139,20 @@ class Settings:
 
     @property
     def tier_models(self) -> list[str]:
-        """Deduplicated list of [COMPLEX_MODEL, SIMPLE_MODEL]."""
-        models = [self.COMPLEX_MODEL]
-        if self.SIMPLE_MODEL != self.COMPLEX_MODEL:
-            models.append(self.SIMPLE_MODEL)
-        return models
+        """Deduplicated list of configured tier models (all priority pools)."""
+        ordered = [
+            *self.COMPLEX_MODELS,
+            *self.SIMPLE_MODELS,
+            *self.REASONING_MODELS,
+            *self.FREE_MODELS,
+        ]
+        seen = set()
+        unique = []
+        for model in ordered:
+            if model not in seen:
+                seen.add(model)
+                unique.append(model)
+        return unique
 
 
 settings = Settings()

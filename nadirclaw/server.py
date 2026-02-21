@@ -55,6 +55,15 @@ class RateLimitExhausted(Exception):
         super().__init__(f"Rate limit exhausted for {model} (retry in {retry_after}s)")
 
 
+class ModelUnavailable(Exception):
+    """Raised when a model is temporarily unavailable or upstream call failed."""
+
+    def __init__(self, model: str, reason: str = ""):
+        self.model = model
+        self.reason = reason
+        super().__init__(f"Model unavailable for {model}: {reason}")
+
+
 # ---------------------------------------------------------------------------
 # Request rate limiter (in-memory, per user)
 # ---------------------------------------------------------------------------
@@ -580,12 +589,7 @@ async def _call_gemini(
         )
     except asyncio.TimeoutError:
         logger.error("Gemini API call timed out after 120s for model=%s", native_model)
-        return {
-            "content": "The model took too long to respond. Please try again.",
-            "finish_reason": "stop",
-            "prompt_tokens": 0,
-            "completion_tokens": 0,
-        }
+        raise ModelUnavailable(model=model, reason="timeout")
     except ClientError as e:
         # Handle 429 rate-limit / quota errors with retry
         if e.code == 429 or "RESOURCE_EXHAUSTED" in str(e):
@@ -611,8 +615,17 @@ async def _call_gemini(
                     MAX_RETRIES, native_model,
                 )
                 raise RateLimitExhausted(model=model, retry_after=retry_delay)
-        # Non-429 client errors — re-raise
-        raise
+        err_str = str(e).lower()
+        if e.code in (500, 502, 503, 504) or any(
+            x in err_str for x in ("unavailable", "internal", "timeout", "unknown")
+        ):
+            raise ModelUnavailable(model=model, reason=str(e))
+        # Non-429 validation/auth style client errors still treated as unavailable
+        # to allow failover candidates for this tier.
+        raise ModelUnavailable(model=model, reason=str(e))
+    except Exception as e:
+        # Unknown provider errors should trigger tier failover as requested.
+        raise ModelUnavailable(model=model, reason=str(e))
 
     # Extract usage metadata
     usage = getattr(response, "usage_metadata", None)
@@ -705,12 +718,28 @@ async def _call_litellm(
     try:
         response = await litellm.acompletion(**call_kwargs)
     except Exception as e:
-        # Catch rate limit errors from any provider through LiteLLM
+        # Catch rate limit / availability errors from any provider through LiteLLM
         err_str = str(e).lower()
         if "429" in err_str or "rate" in err_str or "quota" in err_str or "resource_exhausted" in err_str:
             logger.warning("LiteLLM 429 rate limit for model=%s: %s", litellm_model, e)
             raise RateLimitExhausted(model=model, retry_after=60)
-        raise
+        if any(
+            x in err_str
+            for x in (
+                "503",
+                "502",
+                "500",
+                "service unavailable",
+                "unavailable",
+                "timeout",
+                "timed out",
+                "connection",
+                "unknown",
+            )
+        ):
+            raise ModelUnavailable(model=model, reason=str(e))
+        # Unknown upstream errors should also trigger failover candidates.
+        raise ModelUnavailable(model=model, reason=str(e))
 
     return {
         "content": response.choices[0].message.content,
@@ -741,74 +770,114 @@ async def _dispatch_model(
         return await _call_litellm(model, request, provider)
 
 
+def _unique_preserve_order(items: List[str]) -> List[str]:
+    """Deduplicate while preserving order."""
+    seen = set()
+    out = []
+    for item in items:
+        if item and item not in seen:
+            seen.add(item)
+            out.append(item)
+    return out
+
+
+def _get_tier_pool(tier: str) -> List[str]:
+    """Return configured model pool for a routing tier."""
+    if tier == "simple":
+        return settings.SIMPLE_MODELS
+    if tier == "complex":
+        return settings.COMPLEX_MODELS
+    if tier == "reasoning":
+        return settings.REASONING_MODELS
+    if tier == "free":
+        return settings.FREE_MODELS
+    return []
+
+
+def _build_failover_candidates(selected_model: str, tier: str) -> List[str]:
+    """Build ordered model failover candidates for a selected model/tier."""
+    primary_pool = _get_tier_pool(tier)
+    others_in_tier = [m for m in primary_pool if m != selected_model]
+
+    cross_tier: List[str] = []
+    if tier == "simple":
+        cross_tier = settings.COMPLEX_MODELS
+    elif tier == "complex":
+        cross_tier = settings.SIMPLE_MODELS
+    elif tier == "reasoning":
+        cross_tier = [*settings.COMPLEX_MODELS, *settings.SIMPLE_MODELS]
+    elif tier == "free":
+        cross_tier = [*settings.SIMPLE_MODELS, *settings.COMPLEX_MODELS]
+    else:
+        # direct/alias/manual requests: best-effort fallback
+        cross_tier = [*settings.SIMPLE_MODELS, *settings.COMPLEX_MODELS]
+
+    return _unique_preserve_order([selected_model, *others_in_tier, *cross_tier])
+
+
 async def _call_with_fallback(
     selected_model: str,
     request: "ChatCompletionRequest",
     provider: str | None,
     analysis_info: Dict[str, Any],
 ) -> tuple:
-    """Try the selected model; on rate limit, fall back to the other tier.
+    """Try selected model + configured tier failover pool.
 
-    The primary model retries up to MAX_RETRIES times.
-    The fallback model is tried once (no retries) to avoid long waits.
+    Failover triggers on:
+      1) Rate limit / quota exhaustion.
+      2) Service unavailable / timeout / unknown upstream errors.
 
     Returns (response_data, actual_model_used, updated_analysis_info).
     """
     from nadirclaw.credentials import detect_provider
 
-    try:
-        response_data = await _dispatch_model(selected_model, request, provider)
-        return response_data, selected_model, analysis_info
-    except RateLimitExhausted as e:
-        # Determine fallback model (swap tiers)
-        if selected_model == settings.SIMPLE_MODEL:
-            fallback_model = settings.COMPLEX_MODEL
-        elif selected_model == settings.COMPLEX_MODEL:
-            fallback_model = settings.SIMPLE_MODEL
-        else:
-            # Direct model request — try simple first, then complex
-            fallback_model = settings.SIMPLE_MODEL
+    tier = analysis_info.get("tier", "direct") or "direct"
+    candidates = _build_failover_candidates(selected_model, tier)
 
-        # Don't fall back to the same model
-        if fallback_model == selected_model:
-            logger.error(
-                "Rate limit on %s but fallback is the same model. Returning error.",
-                selected_model,
-            )
-            return _rate_limit_error_response(selected_model), selected_model, analysis_info
+    fallback_chain: List[str] = []
+    exhausted_models: List[str] = []
+    unavailable_models: List[str] = []
 
-        logger.warning(
-            "⚡ Rate limit on %s — falling back to %s",
-            selected_model, fallback_model,
-        )
-        fallback_provider = detect_provider(fallback_model)
+    for idx, candidate in enumerate(candidates):
+        candidate_provider = provider if idx == 0 else detect_provider(candidate)
+
+        if idx > 0:
+            logger.warning("⚡ Failover attempt %d: %s", idx, candidate)
 
         try:
-            # Call fallback without retries — one shot only.
-            # Pass _retry_count >= MAX_RETRIES so it raises immediately on 429.
-            if fallback_provider == "google":
-                response_data = await _call_gemini(
-                    fallback_model, request, fallback_provider,
-                    _retry_count=99,  # Skip retries — one shot only
-                )
-            else:
-                response_data = await _call_litellm(
-                    fallback_model, request, fallback_provider,
-                )
-            analysis_info = {
+            response_data = await _dispatch_model(candidate, request, candidate_provider)
+            if idx == 0:
+                return response_data, candidate, analysis_info
+
+            updated = {
                 **analysis_info,
                 "fallback_from": selected_model,
-                "selected_model": fallback_model,
+                "fallback_chain": fallback_chain + [candidate],
+                "selected_model": candidate,
                 "strategy": analysis_info.get("strategy", "smart-routing") + "+fallback",
             }
-            return response_data, fallback_model, analysis_info
-        except RateLimitExhausted:
-            # Both models are rate-limited
-            logger.error(
-                "Both %s and %s are rate-limited. Returning error.",
-                selected_model, fallback_model,
-            )
-            return _rate_limit_error_response(selected_model), selected_model, analysis_info
+            return response_data, candidate, updated
+        except RateLimitExhausted as e:
+            exhausted_models.append(candidate)
+            fallback_chain.append(candidate)
+            logger.warning("Model rate-limited: %s", candidate)
+            continue
+        except ModelUnavailable as e:
+            unavailable_models.append(candidate)
+            fallback_chain.append(candidate)
+            logger.warning("Model unavailable: %s (%s)", candidate, e.reason)
+            continue
+
+    if exhausted_models and not unavailable_models:
+        logger.error("All failover candidates rate-limited: %s", exhausted_models)
+        return _rate_limit_error_response(selected_model), selected_model, analysis_info
+
+    logger.error(
+        "All failover candidates failed. rate_limited=%s unavailable=%s",
+        exhausted_models,
+        unavailable_models,
+    )
+    return _service_unavailable_error_response(selected_model), selected_model, analysis_info
 
 
 def _rate_limit_error_response(model: str) -> Dict[str, Any]:
@@ -818,6 +887,19 @@ def _rate_limit_error_response(model: str) -> Dict[str, Any]:
             "⚠️ All configured models are currently rate-limited. "
             "Please wait a minute and try again, or consider upgrading your API plan. "
             "Check limits at https://ai.google.dev/gemini-api/docs/rate-limits"
+        ),
+        "finish_reason": "stop",
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+    }
+
+
+def _service_unavailable_error_response(model: str) -> Dict[str, Any]:
+    """Build a graceful response when all candidate models are unavailable."""
+    return {
+        "content": (
+            "⚠️ All configured models are temporarily unavailable or returned unknown upstream errors. "
+            "Please retry shortly."
         ),
         "finish_reason": "stop",
         "prompt_tokens": 0,

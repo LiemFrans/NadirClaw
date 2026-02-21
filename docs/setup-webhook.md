@@ -2,6 +2,18 @@
 
 The setup webhook lets you remotely update supported NadirClaw environment variables, persist them to `~/.nadirclaw/.env`, and optionally fetch Ollama models.
 
+It supports **multiple models per tier** using comma-separated values (priority order), for example:
+
+- `nadirclaw_simple_model`: `gemini-2.5-flash,ollama/llama3.1:8b`
+- `nadirclaw_complex_model`: `gpt-4.1,claude-sonnet-4-5-20250929`
+- `nadirclaw_reasoning_model`: `o3,o4-mini`
+- `nadirclaw_free_model`: `ollama/llama3.1:8b,ollama/qwen3:32b`
+
+Failover is attempted automatically when:
+
+1. Token/quota is exceeded (rate limit / top-up required).
+2. Service is unavailable, timeout, or unknown upstream errors occur.
+
 - **Endpoint**: `POST /v1/setup/webhook`
 - **Auth**: same as other `/v1/*` endpoints (`NADIRCLAW_AUTH_TOKEN` if enabled)
 
@@ -27,10 +39,10 @@ If neither is set, admin login is disabled.
 {
   "ollama_api_base": "10.4.136.145:11434",
   "env": {
-    "nadirclaw_simple_model": "gemini-2.5-flash",
-    "nadirclaw_complex_model": "gpt-4.1",
-    "nadirclaw_reasoning_model": "o3",
-    "nadirclaw_free_model": "ollama/llama3.1:8b",
+    "nadirclaw_simple_model": "gemini-2.5-flash,ollama/llama3.1:8b",
+    "nadirclaw_complex_model": "gpt-4.1,claude-sonnet-4-5-20250929",
+    "nadirclaw_reasoning_model": "o3,o4-mini",
+    "nadirclaw_free_model": "ollama/llama3.1:8b,ollama/qwen3:32b",
     "nadirclaw_auth_token": "local",
     "gemini_api_key": "AIza...",
     "anthropic_api_key": "sk-ant-...",
@@ -58,6 +70,7 @@ If neither is set, admin login is disabled.
 - `env` *(optional, object)*
   - Key-value updates for supported environment variables.
   - Only the variables listed below are applied; unknown keys are ignored.
+  - Tier model keys accept comma-separated values for ordered failover.
 - `fetch_models` *(optional, boolean, default: `true`)*
   - If `true`, NadirClaw calls `${OLLAMA_API_BASE}/api/tags` and returns discovered models.
 
@@ -140,10 +153,10 @@ curl -X POST http://localhost:8856/v1/setup/webhook \
   -H "Content-Type: application/json" \
   -d '{
     "env": {
-      "nadirclaw_simple_model": "gemini-2.5-flash",
-      "nadirclaw_complex_model": "gpt-4.1",
-      "nadirclaw_reasoning_model": "o3",
-      "nadirclaw_free_model": "ollama/llama3.1:8b",
+      "nadirclaw_simple_model": "gemini-2.5-flash,ollama/llama3.1:8b",
+      "nadirclaw_complex_model": "gpt-4.1,claude-sonnet-4-5-20250929",
+      "nadirclaw_reasoning_model": "o3,o4-mini",
+      "nadirclaw_free_model": "ollama/llama3.1:8b,ollama/qwen3:32b",
       "nadirclaw_auth_token": "local",
       "nadirclaw_confidence_threshold": "0.06",
       "nadirclaw_port": "8856",
