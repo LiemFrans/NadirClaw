@@ -181,6 +181,14 @@ class SetupWebhookRequest(BaseModel):
     env: Optional[Dict[str, Any]] = None
 
 
+class AdminProviderModelsRequest(BaseModel):
+    """Request payload for admin provider model discovery."""
+
+    provider: str
+    ollama_api_base: Optional[str] = None
+    credential_override: Optional[str] = None
+
+
 _SETUP_WEBHOOK_FIELD_TO_ENV = {
     "nadirclaw_simple_model": "NADIRCLAW_SIMPLE_MODEL",
     "nadirclaw_complex_model": "NADIRCLAW_COMPLEX_MODEL",
@@ -286,6 +294,21 @@ def _upsert_nadirclaw_env_var(key: str, value: str) -> Path:
         lines.append(new_line)
 
     env_path.write_text("\n".join(lines) + "\n")
+    return env_path
+
+
+def _remove_nadirclaw_env_var(key: str) -> Path:
+    """Remove a key from ~/.nadirclaw/.env and return its path."""
+    config_dir = Path.home() / ".nadirclaw"
+    env_path = config_dir / ".env"
+    config_dir.mkdir(parents=True, exist_ok=True)
+
+    lines: List[str] = []
+    if env_path.exists():
+        lines = env_path.read_text().splitlines()
+
+    filtered = [line for line in lines if not line.strip().startswith(f"{key}=")]
+    env_path.write_text("\n".join(filtered).rstrip("\n") + ("\n" if filtered else ""))
     return env_path
 
 
@@ -1313,6 +1336,75 @@ async def admin_settings_page(request: Request):
     return render_admin_settings(result=None, settings_obj=settings)
 
 
+@app.post("/admin/provider-models")
+async def admin_provider_models(
+    request: Request,
+    payload: AdminProviderModelsRequest,
+):
+    """Return available model names for a provider (for admin comboboxes)."""
+    if not is_admin_authenticated(request):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    from nadirclaw.credentials import detect_provider, get_credential
+    from nadirclaw.setup import fetch_provider_models
+
+    raw_provider = (payload.provider or "").strip().lower()
+    provider_key = raw_provider
+    if provider_key in {"", "custom", "other", "auto"}:
+        return {"provider": raw_provider, "models": [], "count": 0}
+
+    # Map provider aliases for fetching.
+    fetch_provider_key = "openai" if provider_key == "openai-codex" else provider_key
+
+    credential = ""
+    if fetch_provider_key != "ollama":
+        override = (payload.credential_override or "").strip()
+        credential = override or get_credential(provider_key) or get_credential(fetch_provider_key) or ""
+        # OpenAI model listing should also work when user only has openai-codex OAuth.
+        if not credential and fetch_provider_key == "openai":
+            credential = get_credential("openai-codex") or ""
+
+    try:
+        models = fetch_provider_models(
+            fetch_provider_key,
+            credential,
+            ollama_api_base=payload.ollama_api_base or settings.OLLAMA_API_BASE,
+        )
+    except Exception as e:
+        logger.warning("Failed to load provider models for admin UI: provider=%s error=%s", provider_key, e)
+        return {"provider": provider_key, "models": [], "count": 0}
+
+    # Fallback to local registry if API fetch returns empty.
+    if not models:
+        try:
+            from nadirclaw.routing import MODEL_REGISTRY
+
+            models = [
+                m for m in MODEL_REGISTRY.keys()
+                if (detect_provider(m) or "") == fetch_provider_key
+            ]
+        except Exception:
+            models = []
+
+    # Admin textbox stores model name without provider prefix.
+    normalized: List[str] = []
+    prefix = f"{provider_key}/"
+    for m in models:
+        val = m.strip()
+        if not val:
+            continue
+        if val.lower().startswith(prefix):
+            val = val[len(prefix):]
+        normalized.append(val)
+
+    unique_models = sorted(set(normalized))
+    return {
+        "provider": provider_key,
+        "models": unique_models,
+        "count": len(unique_models),
+    }
+
+
 @app.post("/admin/login")
 async def admin_login(request: Request):
     """Login endpoint for admin settings UI."""
@@ -1410,6 +1502,19 @@ async def admin_update_settings(request: Request):
             continue
         env_payload[field_name] = value
 
+    clear_secret_map = {
+        "clear_nadirclaw_auth_token": "NADIRCLAW_AUTH_TOKEN",
+        "clear_gemini_api_key": "GEMINI_API_KEY",
+        "clear_anthropic_api_key": "ANTHROPIC_API_KEY",
+        "clear_openai_api_key": "OPENAI_API_KEY",
+    }
+    cleared_env_keys: List[str] = []
+    for clear_field, env_key in clear_secret_map.items():
+        if str(form.get(clear_field, "")).strip().lower() in {"1", "true", "on", "yes"}:
+            os.environ.pop(env_key, None)
+            _remove_nadirclaw_env_var(env_key)
+            cleared_env_keys.append(env_key)
+
     payload = SetupWebhookRequest(
         ollama_api_base=str(form.get("ollama_api_base", "")).strip() or None,
         fetch_models=form.get("fetch_models") == "on",
@@ -1417,14 +1522,17 @@ async def admin_update_settings(request: Request):
     )
 
     logger.info(
-        "Admin settings save requested: client=%s form_fields=%d env_fields=%d fetch_models=%s",
+        "Admin settings save requested: client=%s form_fields=%d env_fields=%d fetch_models=%s cleared_keys=%s",
         request.client.host if request.client else "unknown",
         len(form),
         len(env_payload),
         payload.fetch_models,
+        cleared_env_keys,
     )
 
     result = _apply_setup_updates(payload)
+    if cleared_env_keys:
+        result["cleared"] = cleared_env_keys
 
     logger.info(
         "Admin settings save completed: client=%s updated_count=%d cache_cleared=%s model_count=%s",

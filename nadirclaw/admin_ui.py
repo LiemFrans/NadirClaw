@@ -220,6 +220,17 @@ def render_admin_settings(
             return provider.lower(), rest
         return provider_for_model(m), m
 
+    def model_name_for_provider(provider: str, model_name: str) -> str:
+        """Return model name without provider prefix for provider-specific UI."""
+        p = (provider or "").lower().strip()
+        m = (model_name or "").strip()
+        if not m:
+            return ""
+        prefix = f"{p}/"
+        if p and m.lower().startswith(prefix):
+            return m[len(prefix):]
+        return m
+
     def provider_options_html(selected: str) -> str:
         providers = [
             "ollama",
@@ -236,6 +247,31 @@ def render_admin_settings(
             for p in providers
         )
 
+    def model_options_html_for_provider(selected_provider: str, selected_name: str = "") -> str:
+        provider = (selected_provider or "").lower().strip()
+        selected_clean = (selected_name or "").strip()
+        if not provider or provider == "custom":
+            return (
+                f'<option value="{escape(selected_clean, quote=True)}" selected>{escape(selected_clean)}</option>'
+                if selected_clean
+                else ""
+            )
+
+        names = set()
+        for full_model in sorted_models:
+            if provider_for_model(full_model) != provider:
+                continue
+            names.add(model_name_for_provider(provider, full_model))
+
+        if selected_clean:
+            names.add(selected_clean)
+
+        return "".join(
+            f'<option value="{escape(name, quote=True)}"{" selected" if name == selected_clean else ""}>{escape(name)}</option>'
+            for name in sorted(names)
+            if name
+        )
+
     result_html = ""
     if result is not None:
         result_pretty = escape(json.dumps(result, indent=2), quote=False)
@@ -245,6 +281,29 @@ def render_admin_settings(
         )
 
     default_ollama = escape(settings_obj.OLLAMA_API_BASE, quote=True)
+
+    model_candidates = {
+        settings_obj.SIMPLE_MODEL,
+        settings_obj.COMPLEX_MODEL,
+        settings_obj.REASONING_MODEL,
+        settings_obj.FREE_MODEL,
+    }
+
+    raw_models = os.getenv("NADIRCLAW_MODELS", "")
+    if raw_models:
+        model_candidates.update(m.strip() for m in raw_models.split(",") if m.strip())
+
+    try:
+        from nadirclaw.routing import MODEL_REGISTRY
+
+        model_candidates.update(MODEL_REGISTRY.keys())
+    except Exception:
+        pass
+
+    sorted_models = sorted(
+        [m for m in model_candidates if m],
+        key=lambda m: (provider_for_model(m), m.lower()),
+    )
 
     simple_full = os.getenv("NADIRCLAW_SIMPLE_MODEL", "") or settings_obj.SIMPLE_MODEL
     complex_full = os.getenv("NADIRCLAW_COMPLEX_MODEL", "") or settings_obj.COMPLEX_MODEL
@@ -296,6 +355,8 @@ def render_admin_settings(
             .subtitle {{ color: var(--muted); margin: 0 0 16px 0; }}
             .grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }}
             .field {{ display: flex; flex-direction: column; gap: 6px; }}
+            .field-row {{ display: flex; gap: 8px; align-items: center; }}
+            .field-row input {{ flex: 1; }}
             label {{ font-weight: 600; }}
             .hint {{ font-size: 12px; color: var(--muted); }}
             input, select {{
@@ -358,12 +419,12 @@ def render_admin_settings(
                 <form method="post" action="/admin/settings">
                     <div class="section">
                         <h2>Routing Models</h2>
-                        <p class="hint">Choose provider in combobox, then type model name without provider prefix.</p>
+                        <p class="hint">Choose provider in combobox, then choose model name from provider API list.</p>
                         <div class="grid">
-                            <div class="field"><label>nadirclaw_simple_model</label><div class="model-pair"><select name="nadirclaw_simple_model_provider">{provider_options_html(simple_provider)}</select><input name="nadirclaw_simple_model" value="{escape(simple_name, quote=True)}" placeholder="llama3.1:8b" /></div></div>
-                            <div class="field"><label>nadirclaw_complex_model</label><div class="model-pair"><select name="nadirclaw_complex_model_provider">{provider_options_html(complex_provider)}</select><input name="nadirclaw_complex_model" value="{escape(complex_name, quote=True)}" placeholder="gpt-4.1" /></div></div>
-                            <div class="field"><label>nadirclaw_reasoning_model</label><div class="model-pair"><select name="nadirclaw_reasoning_model_provider">{provider_options_html(reasoning_provider)}</select><input name="nadirclaw_reasoning_model" value="{escape(reasoning_name, quote=True)}" placeholder="o3" /></div></div>
-                            <div class="field"><label>nadirclaw_free_model</label><div class="model-pair"><select name="nadirclaw_free_model_provider">{provider_options_html(free_provider)}</select><input name="nadirclaw_free_model" value="{escape(free_name, quote=True)}" placeholder="gpt-oss:14b" /></div></div>
+                            <div class="field"><label>nadirclaw_simple_model</label><div class="model-pair"><select name="nadirclaw_simple_model_provider">{provider_options_html(simple_provider)}</select><select name="nadirclaw_simple_model">{model_options_html_for_provider(simple_provider, simple_name)}</select></div></div>
+                            <div class="field"><label>nadirclaw_complex_model</label><div class="model-pair"><select name="nadirclaw_complex_model_provider">{provider_options_html(complex_provider)}</select><select name="nadirclaw_complex_model">{model_options_html_for_provider(complex_provider, complex_name)}</select></div></div>
+                            <div class="field"><label>nadirclaw_reasoning_model</label><div class="model-pair"><select name="nadirclaw_reasoning_model_provider">{provider_options_html(reasoning_provider)}</select><select name="nadirclaw_reasoning_model">{model_options_html_for_provider(reasoning_provider, reasoning_name)}</select></div></div>
+                            <div class="field"><label>nadirclaw_free_model</label><div class="model-pair"><select name="nadirclaw_free_model_provider">{provider_options_html(free_provider)}</select><select name="nadirclaw_free_model">{model_options_html_for_provider(free_provider, free_name)}</select></div></div>
                             <div class="field"><label>nadirclaw_models</label><input name="nadirclaw_models" value="{current('NADIRCLAW_MODELS')}" placeholder="comma-separated fallback list" /></div>
                             <div class="field"><label>nadirclaw_confidence_threshold</label><input name="nadirclaw_confidence_threshold" value="{current('NADIRCLAW_CONFIDENCE_THRESHOLD')}" placeholder="0.06" /></div>
                         </div>
@@ -373,10 +434,10 @@ def render_admin_settings(
                         <h2>Providers & Authentication</h2>
                         <div class="grid">
                             <div class="field"><label>ollama_api_base</label><input name="ollama_api_base" value="{current('OLLAMA_API_BASE') or default_ollama}" placeholder="http://localhost:11434" /></div>
-                            <div class="field"><label>nadirclaw_auth_token</label><input type="password" name="nadirclaw_auth_token" placeholder="unchanged unless provided" /></div>
-                            <div class="field"><label>gemini_api_key</label><input type="password" name="gemini_api_key" placeholder="unchanged unless provided" /></div>
-                            <div class="field"><label>anthropic_api_key</label><input type="password" name="anthropic_api_key" placeholder="unchanged unless provided" /></div>
-                            <div class="field"><label>openai_api_key</label><input type="password" name="openai_api_key" placeholder="unchanged unless provided" /></div>
+                            <div class="field"><label>nadirclaw_auth_token</label><div class="field-row"><input type="password" name="nadirclaw_auth_token" placeholder="unchanged unless provided" /><button type="button" class="button-secondary clear-secret-btn" data-clear-target="clear_nadirclaw_auth_token">Clear</button></div><input type="hidden" name="clear_nadirclaw_auth_token" value="0" /></div>
+                            <div class="field"><label>gemini_api_key</label><div class="field-row"><input type="password" name="gemini_api_key" placeholder="unchanged unless provided" /><button type="button" class="button-secondary clear-secret-btn" data-clear-target="clear_gemini_api_key">Clear</button></div><input type="hidden" name="clear_gemini_api_key" value="0" /></div>
+                            <div class="field"><label>anthropic_api_key</label><div class="field-row"><input type="password" name="anthropic_api_key" placeholder="unchanged unless provided" /><button type="button" class="button-secondary clear-secret-btn" data-clear-target="clear_anthropic_api_key">Clear</button></div><input type="hidden" name="clear_anthropic_api_key" value="0" /></div>
+                            <div class="field"><label>openai_api_key</label><div class="field-row"><input type="password" name="openai_api_key" placeholder="unchanged unless provided" /><button type="button" class="button-secondary clear-secret-btn" data-clear-target="clear_openai_api_key">Clear</button></div><input type="hidden" name="clear_openai_api_key" value="0" /></div>
                         </div>
                     </div>
 
@@ -400,6 +461,119 @@ def render_admin_settings(
                 {result_html}
             </section>
         </main>
+        <script>
+            (function () {{
+                async function loadProviderModels(providerSelectName, modelSelectName, preserveCurrent = true) {{
+                    const providerEl = document.querySelector(`select[name="${{providerSelectName}}"]`);
+                    const modelEl = document.querySelector(`select[name="${{modelSelectName}}"]`);
+                    if (!providerEl || !modelEl) return;
+
+                    const provider = (providerEl.value || '').trim();
+                    if (!provider || provider === 'custom') return;
+
+                    const ollamaBaseEl = document.querySelector('input[name="ollama_api_base"]');
+                    const ollamaBase = (ollamaBaseEl?.value || '').trim();
+
+                    function credentialOverrideForProvider(p) {{
+                        const keyByProvider = {{
+                            openai: 'openai_api_key',
+                            'openai-codex': 'openai_api_key',
+                            anthropic: 'anthropic_api_key',
+                            google: 'gemini_api_key',
+                        }};
+                        const fieldName = keyByProvider[p] || '';
+                        if (!fieldName) return '';
+                        const fieldEl = document.querySelector(`input[name="${{fieldName}}"]`);
+                        return (fieldEl?.value || '').trim();
+                    }}
+
+                    try {{
+                        const res = await fetch('/admin/provider-models', {{
+                            method: 'POST',
+                            credentials: 'same-origin',
+                            headers: {{ 'Content-Type': 'application/json' }},
+                            body: JSON.stringify({{
+                                provider,
+                                ollama_api_base: ollamaBase || null,
+                                credential_override: credentialOverrideForProvider(provider) || null,
+                            }}),
+                        }});
+                        if (!res.ok) return;
+
+                        const data = await res.json();
+                        const models = Array.isArray(data.models) ? data.models : [];
+                        const current = preserveCurrent ? (modelEl.value || '').trim() : '';
+                        const options = [...new Set([...models, ...(current ? [current] : [])])].filter(Boolean).sort();
+                        modelEl.innerHTML = options
+                            .map((m) => `<option value="${{String(m).replace(/"/g, '&quot;')}}"${{m === current ? ' selected' : ''}}>${{String(m)}}</option>`)
+                            .join('');
+                        if (!options.includes(current) && options.length > 0) {{
+                            modelEl.value = options[0];
+                        }}
+                    }} catch (_e) {{
+                        // Keep existing options if request fails.
+                    }}
+                }}
+
+                const pairs = [
+                    ['nadirclaw_simple_model_provider', 'nadirclaw_simple_model'],
+                    ['nadirclaw_complex_model_provider', 'nadirclaw_complex_model'],
+                    ['nadirclaw_reasoning_model_provider', 'nadirclaw_reasoning_model'],
+                    ['nadirclaw_free_model_provider', 'nadirclaw_free_model'],
+                ];
+
+                for (const [providerName, modelName] of pairs) {{
+                    const providerEl = document.querySelector(`select[name="${{providerName}}"]`);
+                    const modelEl = document.querySelector(`select[name="${{modelName}}"]`);
+                    if (providerEl) {{
+                        providerEl.addEventListener('change', () => {{
+                            if (modelEl) {{
+                                modelEl.innerHTML = '';
+                                modelEl.value = '';
+                            }}
+                            loadProviderModels(providerName, modelName, false);
+                        }});
+                        loadProviderModels(providerName, modelName);
+                    }}
+                }}
+
+                const ollamaBaseEl = document.querySelector('input[name="ollama_api_base"]');
+                if (ollamaBaseEl) {{
+                    ollamaBaseEl.addEventListener('change', () => {{
+                        for (const [providerName, modelName] of pairs) {{
+                            loadProviderModels(providerName, modelName);
+                        }}
+                    }});
+                }}
+
+                const clearButtons = document.querySelectorAll('.clear-secret-btn');
+                clearButtons.forEach((btn) => {{
+                    btn.addEventListener('click', () => {{
+                        const target = btn.getAttribute('data-clear-target');
+                        if (!target) return;
+                        const hidden = document.querySelector(`input[name="${{target}}"]`);
+                        const row = btn.closest('.field-row');
+                        const pwdInput = row ? row.querySelector('input[type="password"]') : null;
+                        if (hidden) hidden.value = '1';
+                        if (pwdInput) pwdInput.value = '';
+                        btn.textContent = 'Will clear';
+                    }});
+
+                    const row = btn.closest('.field-row');
+                    const pwdInput = row ? row.querySelector('input[type="password"]') : null;
+                    if (pwdInput) {{
+                        pwdInput.addEventListener('input', () => {{
+                            const target = btn.getAttribute('data-clear-target');
+                            const hidden = target ? document.querySelector(`input[name="${{target}}"]`) : null;
+                            if (hidden && pwdInput.value.trim() !== '') {{
+                                hidden.value = '0';
+                                btn.textContent = 'Clear';
+                            }}
+                        }});
+                    }}
+                }});
+            }})();
+        </script>
     </body>
     </html>
     """
