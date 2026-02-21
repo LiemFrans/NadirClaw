@@ -394,6 +394,14 @@ class SessionCache:
                 pass
         return len(expired)
 
+    def clear(self) -> int:
+        """Clear all cached routing decisions. Returns number removed."""
+        with self._lock:
+            removed = len(self._cache)
+            self._cache.clear()
+            self._access_order.clear()
+            return removed
+
 
 # Global session cache
 _session_cache = SessionCache(ttl_seconds=1800)

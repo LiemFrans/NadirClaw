@@ -1160,6 +1160,8 @@ async def setup_webhook(
 
 def _apply_setup_updates(payload: SetupWebhookRequest) -> Dict[str, Any]:
     """Apply setup/env updates and optionally fetch Ollama models."""
+    from nadirclaw.auth import reload_local_users
+    from nadirclaw.routing import get_session_cache
     from nadirclaw.setup import fetch_provider_models, _normalize_ollama_api_base
 
     requested_env = payload.env or {}
@@ -1201,6 +1203,13 @@ def _apply_setup_updates(payload: SetupWebhookRequest) -> Dict[str, Any]:
         os.environ[key] = value
         env_path = _upsert_nadirclaw_env_var(key, value)
 
+    resolved_env_path = env_path if isinstance(env_path, Path) else (Path.home() / ".nadirclaw" / ".env")
+
+    # Refresh auth/token mapping and clear routing cache so new models/tokens
+    # are effective immediately for subsequent requests.
+    reload_local_users()
+    cache_cleared = get_session_cache().clear()
+
     models: List[str] = []
     if payload.fetch_models:
         models = fetch_provider_models("ollama", "", ollama_api_base=base)
@@ -1208,9 +1217,10 @@ def _apply_setup_updates(payload: SetupWebhookRequest) -> Dict[str, Any]:
     return {
         "status": "ok",
         "ollama_api_base": base,
-        "env_file": str(env_path) if env_path else str(Path.home() / ".nadirclaw" / ".env"),
+        "env_file": str(resolved_env_path),
         "updated": env_updates,
         "ignored": ignored_vars,
+        "cache_cleared": cache_cleared,
         "models": models,
         "model_count": len(models),
     }

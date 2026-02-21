@@ -64,6 +64,13 @@ def _load_local_users() -> Dict[str, Dict[str, Any]]:
 _LOCAL_USERS: Dict[str, Dict[str, Any]] = _load_local_users()
 
 
+def reload_local_users() -> Dict[str, Dict[str, Any]]:
+    """Reload in-memory local user mapping from current env/file config."""
+    global _LOCAL_USERS
+    _LOCAL_USERS = _load_local_users()
+    return _LOCAL_USERS
+
+
 async def validate_local_auth(
     authorization: Optional[str] = Header(None),
     x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
