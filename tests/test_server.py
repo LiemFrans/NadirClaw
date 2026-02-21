@@ -150,3 +150,57 @@ class TestSetupWebhookEndpoint:
         }
         actual_calls = {(c.args[0], c.args[1]) for c in upsert.call_args_list}
         assert expected_calls.issubset(actual_calls)
+
+
+class TestAdminWebUI:
+    def test_admin_page_shows_login_when_not_authenticated(self, client):
+        resp = client.get("/admin")
+        assert resp.status_code == 200
+        assert "NadirClaw Admin" in resp.text
+        assert "Login" in resp.text
+
+    def test_admin_login_success_sets_cookie(self, client, monkeypatch):
+        monkeypatch.setenv("NADIRCLAW_ADMIN_PASSWORD", "secret")
+        resp = client.post(
+            "/admin/login",
+            data={"password": "secret"},
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303
+        assert resp.headers.get("location") == "/admin"
+        assert "nadirclaw_admin_session=" in resp.headers.get("set-cookie", "")
+
+    def test_admin_settings_requires_auth(self, client):
+        resp = client.post("/admin/settings", data={}, follow_redirects=False)
+        assert resp.status_code == 200
+        assert "Session expired" in resp.text or "NadirClaw Admin" in resp.text
+
+    def test_admin_settings_update_calls_setup_logic(self, client, monkeypatch):
+        monkeypatch.setenv("NADIRCLAW_ADMIN_PASSWORD", "secret")
+        monkeypatch.setattr(
+            "nadirclaw.server._apply_setup_updates",
+            lambda payload: {
+                "status": "ok",
+                "updated": payload.env or {},
+                "models": [],
+                "model_count": 0,
+                "ollama_api_base": payload.ollama_api_base or "http://localhost:11434",
+                "ignored": [],
+                "env_file": "~/.nadirclaw/.env",
+            },
+        )
+
+        login = client.post("/admin/login", data={"password": "secret"}, follow_redirects=False)
+        assert login.status_code == 303
+
+        resp = client.post(
+            "/admin/settings",
+            data={
+                "nadirclaw_simple_model": "gemini-2.5-flash",
+                "nadirclaw_complex_model": "gpt-4.1",
+                "fetch_models": "on",
+            },
+        )
+        assert resp.status_code == 200
+        assert "Last update result" in resp.text
+        assert "gemini-2.5-flash" in resp.text

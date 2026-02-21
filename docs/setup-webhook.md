@@ -5,6 +5,22 @@ The setup webhook lets you remotely update supported NadirClaw environment varia
 - **Endpoint**: `POST /v1/setup/webhook`
 - **Auth**: same as other `/v1/*` endpoints (`NADIRCLAW_AUTH_TOKEN` if enabled)
 
+## Admin Web UI
+
+You can manage the same settings through a web interface:
+
+- **URL**: `GET /admin`
+- **Login**: `POST /admin/login`
+- **Save form**: `POST /admin/settings`
+- **Logout**: `POST /admin/logout`
+
+Admin password source:
+
+1. `NADIRCLAW_ADMIN_PASSWORD` (preferred)
+2. `NADIRCLAW_AUTH_TOKEN` (fallback)
+
+If neither is set, admin login is disabled.
+
 ## Request Body
 
 ```json
