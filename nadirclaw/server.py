@@ -1297,6 +1297,7 @@ async def admin_update_settings(request: Request):
     result = _apply_setup_updates(payload)
     return render_admin_settings(result=result, settings_obj=settings)
 
+
 @app.get("/v1/logs")
 async def view_logs(
     limit: int = 20,

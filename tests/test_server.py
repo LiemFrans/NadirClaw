@@ -46,8 +46,30 @@ class TestModelsEndpoint:
             assert model["object"] == "model"
 
 
+def _make_fake_analysis(tier: str = "simple"):
+    """Return a fake _smart_route_analysis coroutine for testing."""
+    async def _fake(prompt, system_message, user):
+        from nadirclaw.settings import settings
+        selected = settings.COMPLEX_MODEL if tier == "complex" else settings.SIMPLE_MODEL
+        return selected, {
+            "strategy": "smart-routing",
+            "analyzer": "binary",
+            "selected_model": selected,
+            "complexity_score": 0.8 if tier == "complex" else 0.2,
+            "tier": tier,
+            "confidence": 0.9,
+            "reasoning": None,
+            "classifier_latency_ms": 5,
+            "simple_model": settings.SIMPLE_MODEL,
+            "complex_model": settings.COMPLEX_MODEL,
+            "ranked_models": [],
+        }
+    return _fake
+
+
 class TestClassifyEndpoint:
-    def test_classify_returns_classification(self, client):
+    def test_classify_returns_classification(self, client, monkeypatch):
+        monkeypatch.setattr("nadirclaw.server._smart_route_analysis", _make_fake_analysis("simple"))
         resp = client.post("/v1/classify", json={"prompt": "What is 2+2?"})
         assert resp.status_code == 200
         data = resp.json()
@@ -56,7 +78,8 @@ class TestClassifyEndpoint:
         assert "confidence" in data["classification"]
         assert "selected_model" in data["classification"]
 
-    def test_classify_batch(self, client):
+    def test_classify_batch(self, client, monkeypatch):
+        monkeypatch.setattr("nadirclaw.server._smart_route_analysis", _make_fake_analysis("simple"))
         resp = client.post(
             "/v1/classify/batch",
             json={"prompts": ["Hello", "Design a distributed system"]},
