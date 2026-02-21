@@ -34,13 +34,19 @@ class Settings:
         return out
 
     def _tier_models(self, single_env: str, multi_env: str, fallback: list[str]) -> list[str]:
-        raw_multi = os.getenv(multi_env, "").strip()
-        if raw_multi:
-            return self._dedupe_keep_order(self._split_models(raw_multi))
-
         raw_single = os.getenv(single_env, "").strip()
+        raw_multi = os.getenv(multi_env, "").strip()
+
+        # If both are set: keep explicit *_MODEL as primary, append *_MODELS as failover chain.
+        if raw_single and raw_multi:
+            merged = [raw_single, *self._split_models(raw_multi)]
+            return self._dedupe_keep_order(merged)
+
         if raw_single:
             return self._dedupe_keep_order(self._split_models(raw_single))
+
+        if raw_multi:
+            return self._dedupe_keep_order(self._split_models(raw_multi))
 
         return self._dedupe_keep_order(fallback)
 

@@ -42,6 +42,20 @@ from nadirclaw.settings import settings
 logger = logging.getLogger("nadirclaw")
 
 
+def _format_model_chain(models: List[str]) -> str:
+    """Format ordered model chain for logs (primary -> failover...)."""
+    vals = [m for m in (models or []) if m]
+    return " -> ".join(vals) if vals else "-"
+
+
+def _format_failover_only(models: List[str]) -> str:
+    """Format fallback-only chain (exclude primary at index 0)."""
+    vals = [m for m in (models or []) if m]
+    if len(vals) <= 1:
+        return "-"
+    return " -> ".join(vals[1:])
+
+
 # ---------------------------------------------------------------------------
 # Exceptions
 # ---------------------------------------------------------------------------
@@ -353,9 +367,13 @@ async def startup():
         import litellm
         litellm.set_verbose = False
         logger.info("Simple model:  %s", settings.SIMPLE_MODEL)
+        logger.info("Simple failover:  %s", _format_failover_only(settings.SIMPLE_MODELS))
         logger.info("Complex model: %s", settings.COMPLEX_MODEL)
+        logger.info("Complex failover: %s", _format_failover_only(settings.COMPLEX_MODELS))
         logger.info("Reasoning model: %s", settings.REASONING_MODEL)
+        logger.info("Reasoning failover: %s", _format_failover_only(settings.REASONING_MODELS))
         logger.info("Free model:    %s", settings.FREE_MODEL)
+        logger.info("Free failover:    %s", _format_failover_only(settings.FREE_MODELS))
         logger.info("Confidence threshold: %s", settings.CONFIDENCE_THRESHOLD)
         if settings.has_explicit_tiers:
             logger.info("Tier config:   explicit (env vars)")
