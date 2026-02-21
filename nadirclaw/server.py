@@ -1198,6 +1198,66 @@ def _apply_setup_updates(payload: SetupWebhookRequest) -> Dict[str, Any]:
     )
     env_updates["OLLAMA_API_BASE"] = base
 
+    def _mask_env_value(key: str, value: Optional[str]) -> str:
+        """Mask sensitive env values in logs while keeping debug usefulness."""
+        if value is None:
+            return "<unset>"
+        key_upper = key.upper()
+        is_secret = (
+            key_upper.endswith("_TOKEN")
+            or key_upper.endswith("_API_KEY")
+            or "PASSWORD" in key_upper
+            or "SECRET" in key_upper
+        )
+        if not is_secret:
+            return value
+        if value == "":
+            return "<empty-secret>"
+        if len(value) <= 8:
+            return "*" * len(value)
+        return f"{value[:4]}***{value[-2:]} (len={len(value)})"
+
+    updated_keys = sorted(env_updates.keys())
+
+    before_after = [
+        {
+            "key": key,
+            "before": _mask_env_value(key, os.environ.get(key)),
+            "after": _mask_env_value(key, value),
+        }
+        for key, value in sorted(env_updates.items())
+    ]
+
+    change_lines = (
+        [
+            f"  - {item['key']:<32} {item['before']}  ->  {item['after']}"
+            for item in before_after
+        ]
+        if before_after
+        else ["  (no values updated)"]
+    )
+    changes_block = "\n".join(change_lines)
+    ignored_keys = sorted(ignored_vars)
+
+    logger.info(
+        "Settings update requested\n"
+        "  fetch_models: %s\n"
+        "  updated_keys: %s\n"
+        "  ignored_keys: %s\n"
+        "  changes:\n%s",
+        payload.fetch_models,
+        updated_keys,
+        ignored_keys,
+        changes_block,
+    )
+    print(
+        "[NadirClaw] Settings update requested\n"
+        f"  fetch_models: {payload.fetch_models}\n"
+        f"  updated_keys: {updated_keys}\n"
+        f"  ignored_keys: {ignored_keys}\n"
+        f"  changes:\n{changes_block}"
+    )
+
     env_path: Optional[Path] = None
     for key, value in env_updates.items():
         os.environ[key] = value
@@ -1213,6 +1273,25 @@ def _apply_setup_updates(payload: SetupWebhookRequest) -> Dict[str, Any]:
     models: List[str] = []
     if payload.fetch_models:
         models = fetch_provider_models("ollama", "", ollama_api_base=base)
+
+    logger.info(
+        "Settings update applied\n"
+        "  env_file: %s\n"
+        "  updated_count: %d\n"
+        "  cache_cleared: %d\n"
+        "  model_count: %d",
+        resolved_env_path,
+        len(updated_keys),
+        cache_cleared,
+        len(models),
+    )
+    print(
+        "[NadirClaw] Settings update applied\n"
+        f"  env_file: {resolved_env_path}\n"
+        f"  updated_count: {len(updated_keys)}\n"
+        f"  cache_cleared: {cache_cleared}\n"
+        f"  model_count: {len(models)}"
+    )
 
     return {
         "status": "ok",
@@ -1294,7 +1373,25 @@ async def admin_update_settings(request: Request):
         fetch_models=form.get("fetch_models") == "on",
         env=env_payload,
     )
+
+    logger.info(
+        "Admin settings save requested: client=%s form_fields=%d env_fields=%d fetch_models=%s",
+        request.client.host if request.client else "unknown",
+        len(form),
+        len(env_payload),
+        payload.fetch_models,
+    )
+
     result = _apply_setup_updates(payload)
+
+    logger.info(
+        "Admin settings save completed: client=%s updated_count=%d cache_cleared=%s model_count=%s",
+        request.client.host if request.client else "unknown",
+        len(result.get("updated", {})),
+        result.get("cache_cleared", 0),
+        result.get("model_count", 0),
+    )
+
     return render_admin_settings(result=result, settings_obj=settings)
 
 
